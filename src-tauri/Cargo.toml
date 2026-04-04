@@ -1,0 +1,27 @@
+[package]
+name = "eet-mod-runner"
+version = "0.6.0"
+description = "EET Mod Runner — GUI installer for Infinity Engine mods"
+authors = ["Anprionsa"]
+edition = "2024"
+
+[lib]
+name = "eet_mod_runner_lib"
+crate-type = ["staticlib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+confy = "0.6"
+log = "0.4"
+env_logger = "0.11"
+dirs = "6"
+
+[target.'cfg(not(target_os = "windows"))'.dependencies]
+libc = "0.2"

@@ -1,0 +1,4 @@
+# GNU toolchain requires MSYS2 MinGW-w64 binutils (dlltool, etc.)
+# Ensure C:\msys64\mingw64\bin is in PATH before building:
+#   export PATH="/c/msys64/mingw64/bin:$PATH"
+# Or run from MSYS2 MinGW64 shell.

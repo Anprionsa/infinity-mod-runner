@@ -1,0 +1,59 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="anvil-main" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#d0d0d8"/>
+      <stop offset="35%" style="stop-color:#a8a8b0"/>
+      <stop offset="70%" style="stop-color:#808088"/>
+      <stop offset="100%" style="stop-color:#606068"/>
+    </linearGradient>
+    <linearGradient id="arrow-shaft" x1="0%" y1="50%" x2="100%" y2="50%">
+      <stop offset="0%" style="stop-color:#8b7030"/>
+      <stop offset="100%" style="stop-color:#d4a843"/>
+    </linearGradient>
+    <linearGradient id="arrow-head" x1="0%" y1="50%" x2="100%" y2="50%">
+      <stop offset="0%" style="stop-color:#d4a843"/>
+      <stop offset="100%" style="stop-color:#f0d060"/>
+    </linearGradient>
+    <linearGradient id="fletch" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#d4a843"/>
+      <stop offset="100%" style="stop-color:#8b7030"/>
+    </linearGradient>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#1a1e2e"/>
+      <stop offset="100%" style="stop-color:#0c0e14"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Background -->
+  <rect width="512" height="512" rx="76" fill="url(#bg)"/>
+
+  <!-- === ANVIL — scaled down for padding === -->
+  <!-- scale 1.35 instead of 1.5, shifted down slightly -->
+  <!-- At scale 1.35: horn tip x=9 → (9-128)*1.35+256 = 95.35, right x=248 → (248-128)*1.35+256 = 418 -->
+  <g transform="translate(256, 330) scale(1.35) translate(-128, -128)">
+    <path d="M248,91.3V67H80v8H9c0,0,10.7,40.6,67.3,40.6c30.3,0,34.4,12.7,34.4,19.1c0,8.4-5.1,21.9-36.7,32.8V191h38.7
+      c6.8-5.2,15.3-8.2,24.5-8.2s17.7,3.1,24.5,8.2H201c0,0,0-15.1,0-22.9c-23.4-7.7-38.7-20.4-38.7-34.8
+      C162.3,110.6,200.1,92.5,248,91.3z M80,87c-52,0-52-4-52-4h52C80,83,80,85.4,80,87z M88,79v-4h152v4H88z"
+      fill="url(#anvil-main)" stroke="#252a3a" stroke-width="2" stroke-linejoin="round"/>
+  </g>
+
+  <!-- === BOW ARROW — matches anvil width exactly (x=95 to x=418) === -->
+  <!-- Arrowhead tip at x=418, fletching tips at x=95 -->
+  <!-- Arrow was at y=130, gap to anvil top (~195) was ~65px. Closing by 1/3 → move down ~22px to y=152 -->
+  <g>
+    <!-- Shaft: from nock to head base -->
+    <rect x="115" y="149" width="262" height="8" rx="3" fill="url(#arrow-shaft)" stroke="#1a1e2e" stroke-width="2.5"/>
+    <!-- Shaft highlight -->
+    <rect x="120" y="150" width="252" height="2" rx="1" fill="#f0d060" opacity="0.2"/>
+
+    <!-- Arrowhead — tip lands at x=418 -->
+    <path d="M 377 149 L 377 136 L 418 153 L 377 170 L 377 157" fill="url(#arrow-head)" stroke="#1a1e2e" stroke-width="2.5" stroke-linejoin="round"/>
+
+    <!-- Fletching — tips reach to x=95 -->
+    <path d="M 115 149 L 95 131 L 126 149 Z" fill="url(#fletch)" stroke="#1a1e2e" stroke-width="2" stroke-linejoin="round"/>
+    <path d="M 115 157 L 95 175 L 126 157 Z" fill="url(#fletch)" stroke="#1a1e2e" stroke-width="2" stroke-linejoin="round"/>
+
+    <!-- Nock -->
+    <rect x="112" y="147" width="5" height="12" rx="1.5" fill="#8b7030" stroke="#1a1e2e" stroke-width="2"/>
+  </g>
+</svg>
