@@ -44,6 +44,7 @@ body {
 /* ─── Tab Bar ─── */
 .tab-bar {
   display: flex;
+  justify-content: center;
   background: var(--bgs);
   border-bottom: 1px solid var(--brd);
   padding: 0 12px;
@@ -497,6 +498,12 @@ body {
 .resize-handle:hover::after,
 .resize-handle.dragging::after {
   background: var(--gold);
+}
+
+/* ─── Activity Pulse ─── */
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
 }
 
 /* ─── Scrollbar ─── */

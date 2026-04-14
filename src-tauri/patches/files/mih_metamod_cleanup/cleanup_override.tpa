@@ -1,0 +1,52 @@
+DEFINE_ACTION_FUNCTION cleanup_override
+BEGIN
+  // Rename *.pvr to *.pvrz
+
+  ACTION_BASH_FOR "override" "^.*\.pvr$"
+  BEGIN
+    MOVE "%BASH_FOR_FILESPEC%" "%BASH_FOR_FILESPEC%z"
+  END
+
+
+  // Biff game files in override
+  // FIX: First move .IDS and .BCS files to a temp location so MAKE_BIFF can't corrupt them.
+  // WeiDU's MAKE_BIFF regex ^..?.?.?.?.?.?.?\.....?$ matches more than expected,
+  // including .BCS files. Biffed BCS/IDS files become corrupt and break EET_end.
+
+  MKDIR "override/_eetmr_preserve"
+  ACTION_BASH_FOR "override" "^.*\.ids$"
+  BEGIN
+    MOVE "%BASH_FOR_FILESPEC%" "override/_eetmr_preserve/%BASH_FOR_FILE%"
+  END
+  ACTION_BASH_FOR "override" "^.*\.bcs$"
+  BEGIN
+    MOVE "%BASH_FOR_FILESPEC%" "override/_eetmr_preserve/%BASH_FOR_FILE%"
+  END
+
+  MAKE_BIFF "mh#clean"
+  BEGIN
+    "override" "^..?.?.?.?.?.?.?\.....?$"
+  END
+
+  // Move preserved files back
+  ACTION_BASH_FOR "override/_eetmr_preserve" "^.*$"
+  BEGIN
+    MOVE "%BASH_FOR_FILESPEC%" "override/%BASH_FOR_FILE%"
+  END
+  // Clean up temp dir (may fail if not empty, that's OK)
+
+
+  // Remove remaining files in override
+  // FIX: Skip EET.flag — required by EET_end to recognize EET installation.
+  // FIX: Skip .IDS and .BCS files — biffing corrupts them, they must stay in override.
+
+  ACTION_BASH_FOR "override" "^.*$"
+  BEGIN
+    ACTION_IF NOT (~%BASH_FOR_FILE%~ STRING_EQUAL_CASE ~EET.flag~
+               OR ~%BASH_FOR_FILE%~ STRING_MATCHES_REGEXP ~^.*\.ids$~ = 0
+               OR ~%BASH_FOR_FILE%~ STRING_MATCHES_REGEXP ~^.*\.bcs$~ = 0
+               OR ~%BASH_FOR_FILE%~ STRING_EQUAL_CASE ~_eetmr_preserve~) BEGIN
+      DELETE "%BASH_FOR_FILESPEC%"
+    END
+  END
+END	// cleanup_files

@@ -23,6 +23,7 @@ type LogCategory =
   | "IMPORT"
   | "PREFLIGHT"
   | "INSTALL"
+  | "DOWNLOAD"
   | "POLL"
   | "INVOKE"
   | "UI"

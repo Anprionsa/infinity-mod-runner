@@ -44,6 +44,9 @@ pub struct AppConfig {
     pub casefold: bool,
     #[serde(default)]
     pub generic_weidu_args: String,
+    // Telemetry: None = never asked, Some(true) = opted in, Some(false) = opted out
+    #[serde(default)]
+    pub telemetry_opt_in: Option<bool>,
 }
 
 fn default_true() -> bool { true }
@@ -59,3 +62,4 @@ impl AppConfig {
         dirs::config_dir().map(|p| p.join("eet-mod-runner"))
     }
 }
+

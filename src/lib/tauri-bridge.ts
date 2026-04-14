@@ -106,6 +106,36 @@ export async function checkPauseState(gameDir: string): Promise<PauseState> {
   return invoke<PauseState>("check_pause_state", { gameDir });
 }
 
+export interface WeiduVerification {
+  success: boolean;
+  version: string | null;
+  error: string | null;
+}
+
+export interface ModDirScan {
+  exists: boolean;
+  mod_count: number;
+  tp2_count: number;
+  sample_mods: string[];
+  error: string | null;
+}
+
+export async function verifyWeidu(weiduPath: string): Promise<WeiduVerification> {
+  return invoke<WeiduVerification>("verify_weidu", { weiduPath });
+}
+
+export async function scanModDirectory(modDir: string): Promise<ModDirScan> {
+  return invoke<ModDirScan>("scan_mod_directory", { modDir });
+}
+
+export async function checkModExists(
+  modDir: string,
+  gameDir: string,
+  tp2Path: string,
+): Promise<boolean> {
+  return invoke<boolean>("check_mod_exists", { modDir, gameDir, tp2Path });
+}
+
 export async function pickDirectory(title: string): Promise<string | null> {
   const result = await open({ directory: true, title });
   return result as string | null;
@@ -117,4 +147,49 @@ export async function pickFile(
 ): Promise<string | null> {
   const result = await open({ directory: false, title, filters });
   return result as string | null;
+}
+
+export async function countWeiduLogEntries(gameDir: string): Promise<number> {
+  return invoke<number>("count_weidu_log_entries", { gameDir });
+}
+
+// ─── Pre-Install Patcher ───
+
+export interface PatchStatus {
+  id: number;
+  name: string;
+  description: string;
+  target_mod: string | null;
+  status: "applicable" | "already_patched" | "not_needed";
+}
+
+export interface PatchResult {
+  id: number;
+  name: string;
+  status: "applied" | "already_patched" | "failed";
+  error: string | null;
+}
+
+export async function scanPatches(
+  modDir: string,
+  gameDir: string,
+): Promise<PatchStatus[]> {
+  return invoke<PatchStatus[]>("scan_patches", { modDir, gameDir });
+}
+
+export async function applyPatches(
+  modDir: string,
+  gameDir: string,
+  patchIds: number[],
+): Promise<PatchResult[]> {
+  return invoke<PatchResult[]>("apply_patches", { modDir, gameDir, patchIds });
+}
+
+// ─── Install Report ───
+
+export async function saveInstallReport(
+  reportJson: string,
+  path: string,
+): Promise<void> {
+  return invoke("save_install_report", { reportJson, path });
 }

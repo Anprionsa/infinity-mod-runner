@@ -8,6 +8,8 @@ import {
   detectModInstaller,
   getBinaryVersion,
   checkGameFreshness,
+  scanModDirectory,
+  type ModDirScan,
   type GameFreshness,
 } from "../lib/tauri-bridge";
 
@@ -15,6 +17,15 @@ interface Props {
   config: AppConfig;
   onSave: (config: AppConfig) => void;
   configLoaded: boolean;
+  preloaded?: {
+    bg1Valid: boolean | null;
+    bg2Valid: boolean | null;
+    bg1Freshness: GameFreshness | null;
+    bg2Freshness: GameFreshness | null;
+    modDirScan: ModDirScan | null;
+    weiduVersion: string | null;
+    modInstallerVersion: string | null;
+  };
 }
 
 interface Validation {
@@ -22,18 +33,19 @@ interface Validation {
   bg1: boolean | null;
 }
 
-export default function SetupWizard({ config, onSave, configLoaded }: Props) {
+export default function SetupWizard({ config, onSave, configLoaded, preloaded }: Props) {
   const [validation, setValidation] = useState<Validation>({
-    bg2: null,
-    bg1: null,
+    bg2: preloaded?.bg2Valid ?? null,
+    bg1: preloaded?.bg1Valid ?? null,
   });
   const [autoDetecting, setAutoDetecting] = useState(false);
-  const [weiduVersion, setWeiduVersion] = useState<string | null>(null);
-  const [modInstallerVersion, setModInstallerVersion] = useState<string | null>(null);
+  const [weiduVersion, setWeiduVersion] = useState<string | null>(preloaded?.weiduVersion ?? null);
+  const [modDirInfo, setModDirInfo] = useState<ModDirScan | null>(preloaded?.modDirScan ?? null);
+  const [modInstallerVersion, setModInstallerVersion] = useState<string | null>(preloaded?.modInstallerVersion ?? null);
   const [freshness, setFreshness] = useState<{
     bg1: GameFreshness | null;
     bg2: GameFreshness | null;
-  }>({ bg1: null, bg2: null });
+  }>({ bg1: preloaded?.bg1Freshness ?? null, bg2: preloaded?.bg2Freshness ?? null });
 
   // Auto-detect WeiDU and mod_installer on first load if not set
   useEffect(() => {
@@ -92,6 +104,17 @@ export default function SetupWizard({ config, onSave, configLoaded }: Props) {
       setFreshness((prev) => ({ ...prev, bg1: null }));
     }
   }, [config.bg1_game_dir]);
+
+  // Scan mod directory when it changes
+  useEffect(() => {
+    if (config.mod_directory) {
+      scanModDirectory(config.mod_directory)
+        .then(setModDirInfo)
+        .catch(() => setModDirInfo(null));
+    } else {
+      setModDirInfo(null);
+    }
+  }, [config.mod_directory]);
 
   async function handleAutoDetect() {
     setAutoDetecting(true);
@@ -248,6 +271,22 @@ export default function SetupWizard({ config, onSave, configLoaded }: Props) {
         <div className="hint">
           Directory containing extracted mod folders (each with a .tp2 file)
         </div>
+        {config.mod_directory && !modDirInfo && (
+          <div className="hint" style={{ color: "var(--txd)" }}>Scanning mod directory...</div>
+        )}
+        {modDirInfo && modDirInfo.mod_count > 0 && (
+          <div className="hint valid">
+            {modDirInfo.mod_count} mod folders found ({modDirInfo.tp2_count} .tp2 files)
+          </div>
+        )}
+        {modDirInfo && modDirInfo.mod_count === 0 && modDirInfo.exists && (
+          <div className="hint invalid">
+            No mods found. Mods must be extracted (unzipped) here, each in its own subfolder.
+          </div>
+        )}
+        {modDirInfo && !modDirInfo.exists && (
+          <div className="hint invalid">Directory does not exist</div>
+        )}
       </div>
 
       <h3>Tool Paths</h3>

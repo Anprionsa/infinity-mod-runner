@@ -10,9 +10,13 @@ A Tauri v2 app that wraps [mod_installer](https://github.com/dark0dave/mod_insta
 
 - **Dual log import** — Side-by-side import for WeiDU-BGEE.log and WeiDU.log. Wrong-slot detection warns if you swap the logs. Mod list grouped by phase (BGEE first, then EET). Paths persisted across sessions
 
-- **Pre-flight checks** — Validates essential mods (EET, EET_End, EE Fixpack, DLC Merger), fetches known issues and compat data from the hosted Forge. Blocks install on critical errors
+- **Download manager** — Automatically downloads GitHub-hosted mods using Forge's cached release data (no API key needed). Shows manual download links for non-GitHub mods. Batch download with progress tracking. Per-mod "view" links open source pages in your browser
 
-- **Install runner** — Real-time dashboard powered by `install_status.json` polling. Combined BG1 + EET progress. Phase indicator badge. ETA calculation. Pause/Resume support. All mod_installer CLI flags exposed
+- **Pre-flight checks** — Validates essential mods, verifies all mods are downloaded (batch tp2 scan), fetches known issues and compat data from the hosted Forge. Progress bar during checks. Blocks install on critical errors
+
+- **Pre-install patcher** — 35 bundled patches fix known mod bugs in the Extracted source before mod_installer runs. Scans for applicable patches, shows checklist, applies with one click. Idempotent marker detection. Handles double-nested and arbitrarily-named mod directories via tp2-based discovery
+
+- **Install runner** — Real-time dashboard with triple-source progress tracking (install_status.json + stdout counter + weidu.log ground truth). Activity indicator shows install is alive during long components. Graceful abort (Ctrl+C with 10s fallback). Pause with user-facing banner. All mod_installer CLI flags exposed
 
 - **Issues panel** — Errors grouped by mod with expandable details. Exit code categorization (WeiDU Crash / Install Failed / Unknown). Skip reason distinction (expected vs suspicious). Sorted by severity
 
@@ -32,9 +36,10 @@ Frontend (React 18 + TypeScript + Vite)
   |-- invoke() ──> Rust backend (Tauri v2)
   |                  |-- std::process::Command ──> mod_installer
   |                  |-- File I/O (install_status.json, install_errors.log)
+  |                  |-- HTTP downloads (reqwest) ──> GitHub archives, direct URLs
   |                  |-- Config persistence (confy)
   |
-  |-- fetch() ───> Hosted Forge data (known_issues.json, compat.json, per-mod ki)
+  |-- fetch() ───> Hosted Forge data (mods-index, version_cache, github_mods, ki)
 ```
 
 - **mod_installer** is invoked as a subprocess — no library coupling
@@ -85,6 +90,32 @@ npm run tauri build
 [MIT](LICENSE)
 
 ## Changelog
+
+### v0.8.0 (2026-04-08)
+- **Pre-install patcher** — 35 bundled patches for known mod bugs. Scans Extracted directory by tp2 filename (handles any folder naming). Patch types: file copy, text replace, file rename, mkdir, game dir copy, game dir append, game dir write. Marker-based idempotence. Checklist UI in Pre-Flight tab with scan/apply/re-scan flow
+- **Async Rust commands** — All heavy I/O commands (14 total) now use `spawn_blocking`, keeping the UI responsive during splash, download plan builds, and install monitoring. Fixes "not responding" on Windows
+- **WeiDU.log ground truth counter** — Reads the game's weidu.log directly every 2.5s as a third progress source. Bypasses mod_installer's install_status.json which stops updating during long components like EET
+- **Stdout fallback counter** — Independently counts SUCCESSFULLY INSTALLED / INSTALLED WITH WARNINGS / SKIPPING lines from WeiDU output
+- **Activity indicator** — Green pulsing dot, log line count, and "last update Xs ago" shown during install. "Large component in progress" label when counter is stuck but install is alive
+- **Graceful abort** — Sends CTRL_BREAK_EVENT (Windows) / SIGINT (Unix) first, waits 10s, then force-kills. Abort pending banner. Disabled button prevents double-clicks
+- **Pause banner** — "Will pause after current mod finishes" message shown when pause is requested
+- **Resource limit checks** — Counts new kits and spells per level across all mods in the install. Warns when approaching engine limits (256 kits, 50 spells per level). Fetches all mod detail files in batches
+- **Download plan caching** — Persists to disk across sessions. No re-scan needed on app restart
+- **View links** — Per-mod "view" links open source pages in default browser via tauri-plugin-opener
+- **Windows file share mode** — Explicit FILE_SHARE_READ/WRITE/DELETE when reading install_status.json for concurrent access
+- **Verbose poll diagnostics** — Logs raw BG2 status values for first 20 polls and every 50th for debugging
+- **Patcher patches include** — SFO library fixes (SCS, ToF, IWDification, MiH), ALWAYS block guards (Angelo, BuTcHeRy), BCS decompile guards (Bardic Wonders, TB#Tweaks, 5E Spellcasting), IDS pre-population (ACTION.IDS, TRIGGER.IDS), mih_metamod cleanup (EET.flag + IDS + BCS preservation), and 20+ more
+- **Mod location discovery** — tp2-based recursive scan builds mod folder map. Works with any directory structure (double-nested, human-readable names, GitHub archive extractions)
+
+### v0.7.0 (2026-04-05)
+- **Download Manager** — New Download tab auto-downloads GitHub mods using Forge's `version_cache.json` (no API key or PAT required). Constructs download URLs from cached release tags. Batch download with progress. Per-mod "view" links open source pages in the default browser via `tauri-plugin-opener`. Manual download section with "Open in Browser" for non-GitHub mods (Beamdog forums, Nexus, Weasel Mods, etc.)
+- **Batch mod existence check** — Single Rust command indexes all tp2 files once and checks 400+ mods against the index, replacing 400+ individual filesystem calls
+- **Pre-flight mod download check** — Pre-flight now verifies ALL mods from the import are present on disk (not just the first 5). Directs users to the Download tab for missing mods. Progress bar during checks with step-by-step status
+- **Progress bar accuracy** — Download progress percentage only shows 100% when all mods are truly ready (no rounding up from 99.x%)
+- **Splash screen** — Loading overlay with progress bar during startup. Pre-loads config, Forge connectivity, game directory validation, and saved logs. App renders hidden underneath for instant display
+- **Centered tab bar** — Tabs are now centered in the tab bar for a cleaner look
+- **Performance** — Download plan builds via explicit button instead of auto-running on mount (was causing 2-3 min freeze). Loading step indicators during plan building
+- **reqwest + zip fix** — Switched to `rustls-tls` (from `native-tls`) and `deflate`-only zip to eliminate `liblzma-5.dll` missing error on Windows
 
 ### v0.6.0 (2026-04-03)
 - **Install comparison** — Compare Forge export WeiDU.log against installed WeiDU.log. Shows completely missing mods and partially installed mods with component-level detail. Uses imported log paths from Import tab automatically, or file picker as fallback

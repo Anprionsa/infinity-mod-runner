@@ -1,0 +1,38 @@
+	DEFINE_PATCH_MACRO ~tb#impdiff_work~ BEGIN
+		REPLACE_TEXTUALLY ~Difficulty(EASIEST)~ ~Global("RTWMyDifficulty","global",1)~ //checks my var instead of hardcoded difficulty
+		REPLACE_TEXTUALLY ~Difficulty(EASY)~ ~Global("RTWMyDifficulty","global",2)~
+		REPLACE_TEXTUALLY ~Difficulty(NORMAL)~ ~Global("RTWMyDifficulty","global",3)~
+		REPLACE_TEXTUALLY ~Difficulty(HARD)~ ~Global("RTWMyDifficulty","global",4)~
+		REPLACE_TEXTUALLY ~Difficulty(HARDEST)~ ~Global("RTWMyDifficulty","global",5)~
+		REPLACE_TEXTUALLY ~DifficultyGT(EASIEST)~ ~GlobalGT("RTWMyDifficulty","global",1)~
+		REPLACE_TEXTUALLY ~DifficultyGT(EASY)~ ~GlobalGT("RTWMyDifficulty","global",2)~
+		REPLACE_TEXTUALLY ~DifficultyGT(NORMAL)~ ~GlobalGT("RTWMyDifficulty","global",3)~
+		REPLACE_TEXTUALLY ~DifficultyGT(HARD)~ ~GlobalGT("RTWMyDifficulty","global",4)~
+		REPLACE_TEXTUALLY ~DifficultyGT(HARDEST)~ ~GlobalGT("RTWMyDifficulty","global",5)~
+		REPLACE_TEXTUALLY ~DifficultyLT(EASIEST)~ ~GlobalLT("RTWMyDifficulty","global",1)~
+		REPLACE_TEXTUALLY ~DifficultyLT(EASY)~ ~GlobalLT("RTWMyDifficulty","global",2)~
+		REPLACE_TEXTUALLY ~DifficultyLT(NORMAL)~ ~GlobalLT("RTWMyDifficulty","global",3)~
+		REPLACE_TEXTUALLY ~DifficultyLT(HARD)~ ~GlobalLT("RTWMyDifficulty","global",4)~
+		REPLACE_TEXTUALLY ~DifficultyLT(HARDEST)~ ~GlobalLT("RTWMyDifficulty","global",5)~
+	END
+
+// FIX: Skip scripts that can't round-trip decompile/recompile with modified IDS state.
+// A7#ABS.BCS (Golem Construction), A7!*.BCS, A7-DGLA.BCS (MagicStore), BD*.BCS (SoD),
+// C#AJAN.BCS (Ajantis NPC) cause PARSE ERROR during COMPILE_BAF_TO_BCS, aborting the
+// entire component. The dash in A7- must be escaped in the character class.
+COPY_EXISTING_REGEXP GLOB ~.*\.bcs$~ ~override~
+  PATCH_IF NOT (~%SOURCE_RES%~ STRING_COMPARE_REGEXP ~A7[#!\-].*~ = 0 OR ~%SOURCE_RES%~ STRING_COMPARE_REGEXP ~BD.*~ = 0 OR ~%SOURCE_RES%~ STRING_EQUAL_CASE ~C#AJAN~) BEGIN
+    DECOMPILE_BCS_TO_BAF
+      LAUNCH_PATCH_MACRO ~tb#impdiff_work~
+    COMPILE_BAF_TO_BCS
+  END
+IF ~^1659[234] ~
+BUT_ONLY_IF_IT_CHANGES
+
+COPY_EXISTING_REGEXP GLOB ~.*\.dlg$~ ~override~
+DECOMPILE_DLG_TO_D
+	LAUNCH_PATCH_MACRO ~tb#impdiff_work~
+COMPILE_D_TO_DLG
+IF ~Difficulty\([LG]T\)?~
+BUT_ONLY_IF_IT_CHANGES
+

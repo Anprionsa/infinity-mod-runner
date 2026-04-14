@@ -9,9 +9,13 @@ import {
   readFileContents,
   requestPause,
   requestResume,
+  countWeiduLogEntries,
+  saveInstallReport,
   type InstallStatus,
   type ErrorLogEntry,
 } from "../lib/tauri-bridge";
+import { buildReport, type InstallReport } from "../lib/install-report";
+import { shareReportOnGitHub } from "../lib/telemetry";
 
 interface Props {
   config: AppConfig;
@@ -19,6 +23,7 @@ interface Props {
   running: boolean;
   onRunningChange: (running: boolean) => void;
   onSaveConfig: (config: AppConfig) => void;
+  weiduVersion?: string | null;
 }
 
 interface LogLine {
@@ -180,6 +185,7 @@ export default function InstallRunner({
   running,
   onRunningChange,
   onSaveConfig,
+  weiduVersion,
 }: Props) {
   const updateOption = (key: string, value: boolean | number) => {
     onSaveConfig({ ...config, [key]: value });
@@ -201,6 +207,15 @@ export default function InstallRunner({
   // File-based monitoring — track both phases separately
   const [bg1Status, setBg1Status] = useState<InstallStatus | null>(null);
   const [bg2Status, setBg2Status] = useState<InstallStatus | null>(null);
+
+  // Stdout-based progress counter — independent of install_status.json.
+  const stdoutCompleted = useRef(0);
+  const [stdoutCount, setStdoutCount] = useState(0);
+  const stdoutCurrentMod = useRef<string>("");
+  const [stdoutMod, setStdoutMod] = useState<string>("");
+
+  // WeiDU.log-based progress — the ground truth. Counts ~ lines in the game's weidu.log.
+  const [weiduLogCount, setWeiduLogCount] = useState(0);
   const [errorEntries, setErrorEntries] = useState<ErrorLogEntry[]>([]);
   const errorEntriesRef = useRef<ErrorLogEntry[]>([]); // Mutable accumulator
   const lastSeenLine = useRef(0);
@@ -213,6 +228,10 @@ export default function InstallRunner({
   const [pauseRequested, setPauseRequested] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
   const unlistenRefs = useRef<UnlistenFn[]>([]);
+
+  // Install report
+  const [reportState, setReportState] = useState<"idle" | "generating" | "done" | "error">("idle");
+  const [lastReport, setLastReport] = useState<InstallReport | null>(null);
 
   // Timing + ETA
   const [startTime, setStartTime] = useState<number>(0);
@@ -255,10 +274,12 @@ export default function InstallRunner({
     }
   }, [errorEntries]);
 
-  // ETA calculation — runs whenever status changes
+  // ETA calculation — runs whenever status or stdout count changes
   useEffect(() => {
     if (!running) return;
-    const combined = (bg1Status?.current ?? 0) + (bg2Status?.current ?? 0);
+    const statusCombined = (bg1Status?.current ?? 0) + (bg2Status?.current ?? 0);
+    // Use whichever counter is higher — stdout is the fallback
+    const combined = Math.max(statusCombined, stdoutCount);
     const combinedTotal = (bg1Status?.total ?? 0) + (bg2Status?.total ?? 0);
     if (combinedTotal === 0) return;
 
@@ -290,7 +311,7 @@ export default function InstallRunner({
         }
       }
     }
-  }, [bg1Status, bg2Status, running]);
+  }, [bg1Status, bg2Status, running, stdoutCount, weiduLogCount]);
 
   // Elapsed time counter
   useEffect(() => {
@@ -365,9 +386,17 @@ export default function InstallRunner({
         if (bg2Dir) {
           try {
             bg2s = await readInstallStatus(bg2Dir);
-            if (bg2s) setBg2Status(bg2s);
+            if (bg2s) {
+              setBg2Status(bg2s);
+              // Log every BG2 read for first 20 polls, then every 50th, to diagnose stale reads
+              if (pollCount.current <= 20 || pollCount.current % 50 === 0) {
+                guiLog.debug("POLL", `BG2 raw: current=${bg2s.current} total=${bg2s.total} mod=${bg2s.mod} updated=${bg2s.last_updated}`);
+              }
+            } else if (pollCount.current <= 20 || pollCount.current % 50 === 0) {
+              guiLog.debug("POLL", `BG2 returned null (poll ${pollCount.current})`);
+            }
           } catch (e) {
-            if (pollCount.current <= 5 || pollCount.current % 100 === 0) {
+            if (pollCount.current <= 10 || pollCount.current % 50 === 0) {
               guiLog.warn("POLL", `BG2 read failed (poll ${pollCount.current}): ${e}`);
             }
           }
@@ -404,6 +433,19 @@ export default function InstallRunner({
             if (result.entries.length > 0) appendErrors(result.entries);
             lastSeenErrorLineBg1.current = result.total_lines;
           } catch {}
+        }
+        // Count weidu.log entries every 5th poll (ground truth progress)
+        if (pollCount.current % 5 === 0) {
+          let totalWeiduEntries = 0;
+          if (bg1Dir) {
+            try { totalWeiduEntries += await countWeiduLogEntries(bg1Dir); } catch {}
+          }
+          if (bg2Dir) {
+            try { totalWeiduEntries += await countWeiduLogEntries(bg2Dir); } catch {}
+          }
+          if (totalWeiduEntries > 0) {
+            setWeiduLogCount(totalWeiduEntries);
+          }
         }
       } catch (e) {
         guiLog.error("POLL", `Poll ${pollCount.current} crashed: ${e}`);
@@ -517,6 +559,14 @@ export default function InstallRunner({
     lastSeenLine.current = 0;
     lastSeenErrorLineBg1.current = 0;
     seenStdoutIssues.current.clear();
+    consecutiveTimeouts.current = 0;
+    setMassTimeoutWarning(false);
+    stdoutCompleted.current = 0;
+    setStdoutCount(0);
+    setWeiduLogCount(0);
+    stdoutCurrentMod.current = "";
+    setStdoutMod("");
+    setAbortPending(false);
     if (errorFlushTimer.current) { clearTimeout(errorFlushTimer.current); errorFlushTimer.current = null; }
     setLogExpanded(false);
     setLogStickToBottom(true);
@@ -539,7 +589,8 @@ export default function InstallRunner({
     // Install options — essential
     args.push("--skip-installed", config.skip_installed ? "true" : "false");
     args.push("--timeout", String(config.timeout));
-    args.push("--download", config.download_mods ? "true" : "false");
+    // Always disable mod_installer's download — the Download tab handles all downloads
+    args.push("--download", "false");
     if (config.abort_on_warnings) args.push("--abort-on-warnings");
     if (config.never_abort) args.push("--never-abort");
     if (config.overwrite) args.push("--overwrite");
@@ -652,8 +703,41 @@ export default function InstallRunner({
 
   // Track which messages we've already surfaced to avoid duplicates
   const seenStdoutIssues = useRef(new Set<string>());
+  // Track consecutive timeouts to detect infrastructure failures
+  const consecutiveTimeouts = useRef(0);
+  const [massTimeoutWarning, setMassTimeoutWarning] = useState(false);
 
   function detectStdoutIssue(line: string) {
+    // Track current mod from WeiDU output (e.g. "Installing [Component Name]" or mod_installer's "Installing: modname")
+    const installMatch = line.match(/Installing\s*(?:\[([^\]]+)\]|:\s*(\S+))/i);
+    if (installMatch) {
+      stdoutCurrentMod.current = installMatch[1] || installMatch[2] || "";
+      setStdoutMod(stdoutCurrentMod.current);
+    }
+
+    // Count completed components from WeiDU stdout — the independent progress counter
+    if (/SUCCESSFULLY INSTALLED/i.test(line) || /INSTALLED WITH WARNINGS/i.test(line)) {
+      stdoutCompleted.current++;
+      setStdoutCount(stdoutCompleted.current);
+      consecutiveTimeouts.current = 0;
+      if (massTimeoutWarning) setMassTimeoutWarning(false);
+    }
+
+    // Detect mass timeouts — every component failing means infrastructure problem
+    if (/timed?\s*out/i.test(line)) {
+      consecutiveTimeouts.current++;
+      if (consecutiveTimeouts.current >= 5 && !massTimeoutWarning) {
+        setMassTimeoutWarning(true);
+        guiLog.error("INSTALL", `Mass timeout detected: ${consecutiveTimeouts.current} consecutive timeouts`);
+      }
+    }
+
+    // Count errors/skips as processed components too (they advance the install)
+    if (/NOT INSTALLED DUE TO ERRORS/i.test(line) || /SKIPPING\b/i.test(line)) {
+      stdoutCompleted.current++;
+      setStdoutCount(stdoutCompleted.current);
+    }
+
     // WeiDU prints these patterns for install results
     const patterns: { regex: RegExp; level: string }[] = [
       { regex: /INSTALLED WITH WARNINGS\s+(.+)/i, level: "WARN" },
@@ -694,14 +778,20 @@ export default function InstallRunner({
     }
   }
 
+  const [abortPending, setAbortPending] = useState(false);
+
   async function abortInstall() {
+    if (abortPending) return; // Already aborting
+    setAbortPending(true);
     try {
       await invoke("abort_install");
-      addLine("[EET Mod Runner] Installation aborted by user.", "system");
+      addLine("[EET Mod Runner] Abort signal sent — waiting for current component to finish (up to 10s before force kill)...", "system");
       guiLog.warn("INSTALL", "Installation aborted by user");
-      onRunningChange(false);
+      // Don't immediately set running=false — wait for the install-exit event
+      // The abort is graceful, so it may take a few seconds
     } catch (e) {
       addLine(`[EET Mod Runner] Failed to abort: ${e}`, "system");
+      setAbortPending(false);
     }
   }
 
@@ -748,6 +838,37 @@ export default function InstallRunner({
     }
   }, [config.bg2_game_dir, errorEntries]);
 
+  const generateAndSaveReport = useCallback(async () => {
+    if (!parsedLog || exitCode === null) return;
+    setReportState("generating");
+    try {
+      const forgeBaseUrl = config.forge_data_url || "https://anprionsa.github.io/eet-mod-forge";
+      const report = await buildReport({
+        parsedLog,
+        errorEntries,
+        bg1Status,
+        bg2Status,
+        exitCode,
+        elapsedMs: elapsed,
+        weiduVersion: weiduVersion || "unknown",
+        forgeBaseUrl,
+      });
+      setLastReport(report);
+
+      // Save to game dir
+      const json = JSON.stringify(report, null, 2);
+      const filename = `install-report-${report.timestamp.substring(0, 10)}-${report.id.substring(0, 8)}.json`;
+      const dir = config.bg2_game_dir?.replace(/\\/g, "/") || ".";
+      await saveInstallReport(json, `${dir}/${filename}`);
+
+      guiLog.info("INSTALL", `Install report saved: ${filename} (${report.components.length} components)`);
+      setReportState("done");
+    } catch (e) {
+      guiLog.error("INSTALL", `Failed to generate report: ${e}`);
+      setReportState("error");
+    }
+  }, [parsedLog, exitCode, errorEntries, bg1Status, bg2Status, elapsed, weiduVersion, config]);
+
   // Combine both phases for display
   // Active status = whichever was updated most recently
   const activeStatus = (() => {
@@ -757,12 +878,25 @@ export default function InstallRunner({
     return bg2Status.last_updated >= bg1Status.last_updated ? bg2Status : bg1Status;
   })();
 
-  // Combined progress = sum of both phases
-  const combinedCurrent = (bg1Status?.current ?? 0) + (bg2Status?.current ?? 0);
+  // Combined progress = highest of three sources:
+  // 1. install_status.json (bg1 + bg2 current fields)
+  // 2. stdout counter (SUCCESSFULLY INSTALLED lines)
+  // 3. weidu.log entry count (ground truth — WeiDU writes after each component)
+  const statusCurrent = (bg1Status?.current ?? 0) + (bg2Status?.current ?? 0);
+  const combinedCurrent = Math.max(statusCurrent, stdoutCount, weiduLogCount);
   const combinedTotal = (bg1Status?.total ?? 0) + (bg2Status?.total ?? 0);
+  // If install_status.json has no total yet, use the imported log component count as estimate
+  const effectiveTotal = combinedTotal > 0 ? combinedTotal : (parsedLog?.componentCount ?? 0);
+  const statusStale = running && stdoutCount > statusCurrent + 5;
 
-  const pct = combinedTotal > 0
-    ? Math.round((combinedCurrent / combinedTotal) * 100)
+  // Detect long-running single component (counter stuck but install alive)
+  const lastUpdatedStr = activeStatus?.last_updated || "";
+  const lastUpdatedTime = lastUpdatedStr ? new Date(lastUpdatedStr).getTime() : 0;
+  const statusAlive = running && lastUpdatedTime > 0 && (Date.now() - lastUpdatedTime < 120_000);
+  const counterStuck = running && combinedCurrent > 0 && totalLineCount > 1000 && statusAlive;
+
+  const pct = effectiveTotal > 0
+    ? Math.min(99, Math.round((combinedCurrent / effectiveTotal) * 100))
     : 0;
 
   // Use install_status.json as source of truth for counts (avoids double-counting with errorEntries).
@@ -910,8 +1044,8 @@ export default function InstallRunner({
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
               <div className="current-mod">
                 {isPaused ? "Paused"
-                  : activeStatus?.mod
-                    ? activeStatus.mod
+                  : (activeStatus?.mod || stdoutMod)
+                    ? (statusStale ? stdoutMod || activeStatus?.mod : activeStatus?.mod || stdoutMod)
                     : isComplete ? "Installation complete"
                       : pauseRequested ? "Pausing after current mod..."
                         : combinedCurrent > 0 ? "Installing..."
@@ -930,14 +1064,34 @@ export default function InstallRunner({
             </div>
             <div className="current-component">
               {activeStatus?.component
-                || (combinedCurrent > 0 ? `${combinedCurrent} components processed`
+                || (combinedCurrent > 0 ? `${combinedCurrent} of ${effectiveTotal} components processed`
                   : "Waiting for first mod...")}
-              {activeStatus?.last_updated && (
-                <span style={{ color: "var(--txd)", fontSize: 10, marginLeft: 8 }}>
-                  (status: {activeStatus.last_updated.split("T")[1]?.replace("Z", "") || "?"})
+              {statusStale && (
+                <span style={{ color: "var(--org)", fontSize: 10, marginLeft: 8 }}>
+                  (progress via stdout — status file stale)
                 </span>
               )}
             </div>
+            {/* Activity indicator — shows install is alive during long components */}
+            {running && !isComplete && (
+              <div style={{ fontSize: 11, color: "var(--txd)", marginTop: 4, display: "flex", alignItems: "center", gap: 6 }}>
+                {statusAlive && (
+                  <span style={{
+                    width: 6, height: 6, borderRadius: "50%", background: "var(--grn)",
+                    display: "inline-block", animation: "pulse 2s ease-in-out infinite",
+                  }} />
+                )}
+                {totalLineCount > 0 && (
+                  <span>{totalLineCount >= 1000 ? `${(totalLineCount / 1000).toFixed(0)}K` : totalLineCount} log lines</span>
+                )}
+                {statusAlive && lastUpdatedStr && (
+                  <span>· last status update {Math.round((Date.now() - lastUpdatedTime) / 1000)}s ago</span>
+                )}
+                {counterStuck && (
+                  <span style={{ color: "var(--cyn)" }}>· large component in progress</span>
+                )}
+              </div>
+            )}
           </div>
           <div style={{ display: "flex", gap: 8 }}>
             {running && (
@@ -952,8 +1106,8 @@ export default function InstallRunner({
                 >
                   {isPaused ? "Resume" : pauseRequested ? "Pausing..." : "Pause"}
                 </button>
-                <button className="btn btn-danger" onClick={abortInstall}>
-                  Abort
+                <button className="btn btn-danger" onClick={abortInstall} disabled={abortPending}>
+                  {abortPending ? "Aborting..." : "Abort"}
                 </button>
               </>
             )}
@@ -963,6 +1117,18 @@ export default function InstallRunner({
         <div className="progress-bar" style={{ height: 8 }}>
           <div className="fill" style={{ width: `${pct}%` }} />
         </div>
+
+        {/* Pause/Abort pending banners */}
+        {pauseRequested && !isPaused && (
+          <div className="msg warn" style={{ marginTop: 8, fontSize: 12 }}>
+            ⏸ Pause requested — will pause after the current mod finishes installing. This may take several minutes for large mods.
+          </div>
+        )}
+        {abortPending && (
+          <div className="msg err" style={{ marginTop: 8, fontSize: 12 }}>
+            Abort signal sent — waiting for WeiDU to finish its current operation (force kill in 10s if unresponsive)...
+          </div>
+        )}
 
         <div className="stats-row">
           <div className="stat">
@@ -1065,10 +1231,29 @@ export default function InstallRunner({
               </div>
             )}
           </div>
-          <div style={{ display: "flex", gap: 8, justifyContent: "center" }}>
+          <div style={{ display: "flex", gap: 8, justifyContent: "center", flexWrap: "wrap" }}>
             <button className="btn" onClick={copyErrorReport}>
               Copy Error Report
             </button>
+            <button
+              className="btn"
+              onClick={generateAndSaveReport}
+              disabled={reportState === "generating"}
+            >
+              {reportState === "generating" ? "Generating..." :
+               reportState === "done" ? "Report Saved" :
+               reportState === "error" ? "Report Failed" :
+               "Save Install Report"}
+            </button>
+            {lastReport && config.telemetry_opt_in === true && (
+              <button
+                className="btn"
+                onClick={() => shareReportOnGitHub(lastReport)}
+                title="Opens a pre-filled GitHub Issue — you review before submitting"
+              >
+                Share on GitHub
+              </button>
+            )}
             <button className="btn btn-primary" onClick={() => {
               setExitCode(null);
               setBg1Status(null);
@@ -1083,6 +1268,8 @@ export default function InstallRunner({
               lastSeenLine.current = 0;
               lastSeenErrorLineBg1.current = 0;
               seenStdoutIssues.current.clear();
+    consecutiveTimeouts.current = 0;
+    setMassTimeoutWarning(false);
               if (errorFlushTimer.current) { clearTimeout(errorFlushTimer.current); errorFlushTimer.current = null; }
               setExpandedGroups(new Set());
               setInputNeeded(null);
@@ -1090,9 +1277,60 @@ export default function InstallRunner({
               setLogExpanded(false);
               setLogStickToBottom(true);
               throughputSamples.current = [];
+              setReportState("idle");
+              setLastReport(null);
               setEta(null);
             }}>
               New Install
+            </button>
+          </div>
+          {/* Telemetry opt-in prompt — shown once after first report is generated */}
+          {lastReport && config.telemetry_opt_in === null && (
+            <div className="msg info" style={{ marginTop: 12, fontSize: 12 }}>
+              <div style={{ fontWeight: 600, marginBottom: 4 }}>
+                Help improve mod compatibility data?
+              </div>
+              <div style={{ marginBottom: 8, color: "var(--txd)" }}>
+                Share anonymized install outcomes (mod IDs + pass/fail — no file paths or personal info)
+                with the EET community. Reports are submitted as GitHub Issues so you can see exactly
+                what's shared.
+              </div>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button className="btn btn-primary" style={{ fontSize: 11, padding: "3px 10px" }} onClick={() => {
+                  onSaveConfig({ ...config, telemetry_opt_in: true });
+                }}>
+                  Enable
+                </button>
+                <button className="btn" style={{ fontSize: 11, padding: "3px 10px" }} onClick={() => {
+                  onSaveConfig({ ...config, telemetry_opt_in: false });
+                }}>
+                  No thanks
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── Mass Timeout Warning ── */}
+      {massTimeoutWarning && running && (
+        <div className="msg err" style={{ marginBottom: 12, fontSize: 13 }}>
+          <div style={{ fontWeight: 600, marginBottom: 6 }}>
+            Multiple consecutive timeouts detected
+          </div>
+          <div style={{ marginBottom: 6 }}>
+            The first {consecutiveTimeouts.current} components all timed out. This usually means WeiDU
+            cannot find or execute the mod files. Common causes:
+          </div>
+          <ul style={{ margin: "0 0 8px 20px", fontSize: 12 }}>
+            <li><strong>Mods not extracted</strong> — downloaded .zip/.rar files must be unzipped into the mod directory, each in its own subfolder</li>
+            <li><strong>WeiDU blocked by antivirus</strong> — Windows Defender often quarantines weidu.exe. Add an exception.</li>
+            <li><strong>Wrong mod directory</strong> — check that your mod directory in Setup actually contains the extracted mod folders</li>
+            <li><strong>Timeout too short</strong> — if mods are on a slow drive, increase the timeout in Install Options</li>
+          </ul>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button className="btn btn-danger" onClick={abortInstall} disabled={abortPending}>
+              {abortPending ? "Aborting..." : "Abort Install"}
             </button>
           </div>
         </div>

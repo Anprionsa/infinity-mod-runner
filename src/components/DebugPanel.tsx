@@ -523,6 +523,15 @@ function InstallComparison({ config, parsedLog }: { config: AppConfig; parsedLog
       {loading && (
         <div className="install-dashboard" style={{ textAlign: "center", padding: 24 }}>
           <div style={{ color: "var(--gold)", fontWeight: 600 }}>Comparing logs...</div>
+          <div style={{ color: "var(--txd)", fontSize: 11, marginTop: 8 }}>
+            Reading export log and game weidu.log...
+          </div>
+        </div>
+      )}
+
+      {!loading && !result && !error && !hasImportedLog && !exportPath && (
+        <div className="msg info" style={{ fontSize: 12 }}>
+          Import WeiDU logs in the Import tab first, or click below to select an export log file.
         </div>
       )}
 

@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback } from "react";
 import type { AppConfig, ParsedLog, LogEntry } from "../App";
 import { pickFile, readFileContents } from "../lib/tauri-bridge";
 import { buildParsedLog, parseWeiduLog } from "../lib/log-parser";
@@ -54,34 +54,11 @@ export default function ImportPanel({ config, parsedLog, onImport, onSaveConfig 
     bgee: string | null;
   }>({ eet: null, bgee: null });
   const [modListHeight, setModListHeight] = useState(300);
+  // Mod list renders during splash (app is hidden but mounted).
+  // No lazy render needed — DOM is built before splash disappears.
 
-  // Auto-load from saved config paths on mount (if no log loaded yet)
-  useEffect(() => {
-    if (parsedLog) return; // Already loaded
-    const loadSaved = async () => {
-      let eetRaw: string | null = null;
-      let bgeeRaw: string | null = null;
-      try {
-        if (config.eet_log_path) eetRaw = await readFileContents(config.eet_log_path);
-      } catch { /* file may have moved */ }
-      try {
-        if (config.bgee_log_path) bgeeRaw = await readFileContents(config.bgee_log_path);
-      } catch { /* file may have moved */ }
-
-      if (eetRaw || bgeeRaw) {
-        const parsed = buildParsedLog(
-          eetRaw || "",
-          bgeeRaw || null,
-          config.eet_log_path,
-          config.bgee_log_path,
-        );
-        if (parsed.entries.length > 0 || (parsed.bgeeEntries && parsed.bgeeEntries.length > 0)) {
-          onImport(parsed);
-        }
-      }
-    };
-    loadSaved();
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  // Log auto-loading is now handled in the App splash screen init sequence.
+  // By the time this component renders, parsedLog is already populated if saved paths exist.
 
   const importLog = useCallback(
     async (type: "eet" | "bgee") => {
@@ -302,52 +279,52 @@ export default function ImportPanel({ config, parsedLog, onImport, onSaveConfig 
           </div>
 
           <h3>
-            Mod List ({modGroups.length} mods, {allEntries.length}{" "}
-            components)
-          </h3>
-          <ResizablePanel height={modListHeight} onHeightChange={setModListHeight} minHeight={100} maxHeight={600} className="log-output" style={{ fontSize: 11 }}>
-            {modGroups.map(([mod, entries], groupIdx) => {
-              const source = entries[0]?.source;
-              return (
-                <div key={`${mod}-${source}-${groupIdx}`} style={{ marginBottom: 4 }}>
-                  <span style={{ color: "var(--gold)" }}>{mod}</span>
-                  <span style={{ color: "var(--txd)" }}>
-                    {" "}
-                    ({entries.length} component
-                    {entries.length !== 1 ? "s" : ""})
-                  </span>
-                  {source === "bgee" && (
-                    <span style={{ color: "var(--cyn)", fontSize: 10, marginLeft: 6 }}>
-                      BGEE
-                    </span>
-                  )}
-                  {source === "eet" && (
-                    <span style={{ color: "var(--pur)", fontSize: 10, marginLeft: 6 }}>
-                      EET
-                    </span>
-                  )}
-                  {entries.map((e, i) => (
-                    <div
-                      key={i}
-                      style={{ paddingLeft: 16, color: "var(--txd)" }}
-                    >
-                      #{e.component} {e.component_name}
-                      {e.version && (
-                        <span style={{ opacity: 0.6 }}>
-                          {" "}
-                          v{e.version}
-                        </span>
-                      )}
+                Mod List ({modGroups.length} mods, {allEntries.length}{" "}
+                components)
+              </h3>
+              <ResizablePanel height={modListHeight} onHeightChange={setModListHeight} minHeight={100} maxHeight={600} className="log-output" style={{ fontSize: 11 }}>
+                {modGroups.map(([mod, entries], groupIdx) => {
+                  const source = entries[0]?.source;
+                  return (
+                    <div key={`${mod}-${source}-${groupIdx}`} style={{ marginBottom: 4 }}>
+                      <span style={{ color: "var(--gold)" }}>{mod}</span>
+                      <span style={{ color: "var(--txd)" }}>
+                        {" "}
+                        ({entries.length} component
+                        {entries.length !== 1 ? "s" : ""})
+                      </span>
                       {source === "bgee" && (
-                        <span style={{ color: "var(--cyn)", fontSize: 9, marginLeft: 4, opacity: 0.7 }}>
-                          BG1
+                        <span style={{ color: "var(--cyn)", fontSize: 10, marginLeft: 6 }}>
+                          BGEE
                         </span>
                       )}
+                      {source === "eet" && (
+                        <span style={{ color: "var(--pur)", fontSize: 10, marginLeft: 6 }}>
+                          EET
+                        </span>
+                      )}
+                      {entries.map((e, i) => (
+                        <div
+                          key={i}
+                          style={{ paddingLeft: 16, color: "var(--txd)" }}
+                        >
+                          #{e.component} {e.component_name}
+                          {e.version && (
+                            <span style={{ opacity: 0.6 }}>
+                              {" "}
+                              v{e.version}
+                            </span>
+                          )}
+                          {source === "bgee" && (
+                            <span style={{ color: "var(--cyn)", fontSize: 9, marginLeft: 4, opacity: 0.7 }}>
+                              BG1
+                            </span>
+                          )}
+                        </div>
+                      ))}
                     </div>
-                  ))}
-                </div>
-              );
-            })}
+                  );
+                })}
           </ResizablePanel>
         </>
       )}

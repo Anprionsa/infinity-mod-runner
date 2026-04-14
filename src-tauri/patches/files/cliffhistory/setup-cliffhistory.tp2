@@ -1,0 +1,216 @@
+BACKUP ~CliffHistory\Backup~
+AUTHOR ~supercliffette@yahoo.com.au~
+
+VERSION ~v2~
+
+README ~cliffhistory\cliffhistory-readme.txt~
+
+BEGIN ~Cliffette's 'History' BWI contest entry~
+
+
+/////////////
+// Appends //
+/////////////
+
+EXTEND_TOP ~FFACTLV.BCS~ 	~CliffHistory\Appends\CLFUSHER.baf~
+EXTEND_BOTTOM ~AR0510.BCS~ 	~CliffHistory\Appends\CLFAR0510.baf~
+EXTEND_BOTTOM ~AR0523.BCS~ 	~CliffHistory\Appends\CLFAR0510.baf~
+
+
+///////////////////////////////////
+// Compile scripts and dialogues //
+///////////////////////////////////
+
+COMPILE ~CliffHistory\compile~
+
+//////////////////////////////
+// Unnamed items and spells //
+//////////////////////////////
+
+COPY ~CliffHistory\KitSpells~ 	~Override~
+
+
+////////////////////////////
+// Named items and spells //
+////////////////////////////
+
+COPY ~CliffHistory\clfhsccf.spl~	~Override~ 	SAY NAME1 #52260
+COPY ~CliffHistory\clfhsply.spl~	~Override~ 	SAY NAME1 #20963
+
+COPY ~Cliffhistory\clfhsepo.itm~ 	~Override~ 	SAY NAME1 ~Fonick's Epicopus~ SAY NAME2 ~Fonick's Epicopus~
+
+SAY IDENTIFIED_DESC ~Fonick's Epicopus - The Adventures of A Bard
+
+This is the journal in which Fonick has been keeping track of the history of <CHARNAME> and his adventures together.  The covers are oddly pristine compared to the general mess inside Fonick's pack.  As you thumb through the book, you notice that Fonick has taken the tales of the adventures you had in his absence, and exercised his author's perogative in telling his version of the story.~
+
+COPY ~CliffHistory\clfhswds.itm~	~Override~	SAY NAME1 ~Fonick's Wooden Sword~	SAY NAME2 ~Fonick's Wooden Sword~ SAY IDENTIFIED_DESC ~Fonick's Wooden Sword
+
+While it would pass for a genuine sword if viewed from a great distance on a dark night, any non-blind entity would be able to see that this entire sword is made of wood.  Its lightness allows even the least agile of wielders to rain crushing blows upon an enemy's head, much in the way a piece of paper might be crushed. This sword can best be described as a plaything.
+
+Fonick stresses that even a wooden sword might be used for great evil and thus has had it warded against use by those of evil bent.
+
+
+STATISTICS:
+
+Damage:  1D2
+Weight:  1
+Proficiency Type:  Short Sword
+Type:  1-handed
+Requires:  3 Strength
+Usable By:
+ Anyone of non-evil alignment~
+
+
+//////////////////////////
+// Delusionist Bard Kit //
+//////////////////////////
+
+COPY  ~CliffHistory\Appends\clfbadkt.2da~ ~Override~
+
+ADD_KIT ~CLFDBARD~
+// Weapon restrictions
+~CLFDBARD		1	1	1	1	1	1	1	1~
+// Weapon proficiencies
+~CLFDBARD 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 5 5 5 5 5 1 1 1 3 1 1 1 1 1 1 2 2 2 2 2 2 2 2 2 2 2 2 2~
+// Minimum stat restrictions; stat modifications; dual-class; dual-class; alignment rest; dual-class
+~CLFDBARD           0       12      0       13      0       1~
+~CLFDBARD      		0       1       0       0       -3      -3~
+~CLFDBARD           0       17      0       0       0       18~
+~CLFDBARD           0       17      0       0       0       18~
+~CLFDBARD           1       1       0       0       0       0       0       0       0~
+~CLFDBARD      		0       0       0       0       0       0~
+// Abilities
+~override/clfbadkt.2DA~
+// Kittable - well, not for PC
+~~
+// Kitlist
+~0x00004000	5~
+// HLAs
+~Ba0~        // Change later to specific
+// TOB Equipment start list
+~LEAT20 DART03,40 HELM07 BAG26 RING06 RING31 CLCK27 BOOT01 AMUL19 BRAC10 BELT06 AROW11,40 BULL03,40 BOLT06,40 POTN52,5 POTN04,2 POTN14,5 BOW11 BOW19 XBOW06~
+
+/* These are the strings you want for the lower, mixed and help
+ * descriptions for your kit. */
+SAY ~delusionist~
+SAY ~Delusionist~
+SAY ~DELUSIONIST:  For every bard whose thunderous storytelling can inspire the heavens to shake, for every minstrel whose tragic song can make statues weep, for every poet whose silver tongue can spin stories that would entertain courtly nobles for a thousand and one nights, there are at least a hundred lessers who are tragically impaired in the art of story, song, rhyme or reason.
+
+Generally, those less talented at the finer arts are aware of their deficiencies and leave the creative weaving to their betters.  Yet every now and then, a figure will emerge, so convinced of his or her own artistic genius, that no amount of head pounding or rotten tomatoes will dispel his or her self-imposed illusions.
+
+These are the delusionists, a practised band of bards that leave trails of enemies, terrified, or at least extremely embarrassed, in their wake.  While they are limited in their ability to handle offensive combat, they make up for it with their offensive song.  Delusionists are also highly dextrous and curiously resistant to all forms of projectile weapons as well as attempts to silence them.  Delusionists are always lawful and may not be evil.  At least, not intentionally so.
+
+Advantages:
+-  +1 to dexterity
+-  100% resistance to normal missile weapons
+-  Cannot be silenced
+-  Delusionist's song does not help allies.  Instead it affects all enemies within 30 feet, and they must save vs magic at +4 per round, or become affected by emotion. Additional benefits are gained with each level:
+1st: 5% chance that an enemy within hearing distance will become affected by enfeeblement.
+15th: 10% chance that an enemy within hearing distance will become affected by enfeeblement.
+20th: Everyone within hearing distance must save vs death or be instantly killed.  The delusionist and allies are immune to the effects of the song.  Surviving enemies are enfeebled for that round.
+
+Disadvantages:
+-  Maximum Charisma is 3 points lower than a standard member of the race.
+-  Maximum Wisdom is 3 points lower than a standard member of the race.
+
+~
+
+
+///////////////
+// Creatures //
+///////////////
+
+COPY ~CliffHistory\clfhswz1.cre~	~Override~ 	SAY NAME1 ~Elderon~ SAY NAME2 ~Elderon~
+COPY ~CliffHistory\clfhswz2.cre~	~Override~ 	SAY NAME1 ~Dantorl~ SAY NAME2 ~Dantorl~
+COPY ~CliffHistory\clfhswz3.cre~	~Override~ 	SAY NAME1 ~Rex~ 	SAY NAME2 ~Rex~
+COPY ~CliffHistory\clfhswz4.cre~	~Override~ 	SAY NAME1 ~Bobbin~  SAY NAME2 ~Bobbin~
+COPY ~CliffHistory\clfhsfnx.cre~	~Override~
+  SAY NAME1 ~Fonick~ SAY NAME2 ~Fonick~
+  SAY MORALE ~I must leave!  The world cannot be denied my talent!~
+  SAY HAPPY ~Our actions are brave and our deeds heroic!  I feel a song coming on!~
+  SAY UNHAPPY_ANNOYED ~Such behavior will be *very* hard to sing about.~
+  SAY UNHAPPY_SERIOUS ~Hmm...What word rhymes with 'odious'?~
+  SAY UNHAPPY_BREAKING ~That's enough!  You obviously do not appreciate how hard it is for an artist to work under these conditions!  I am leaving!~
+  SAY LEADER ~O glorious day!  I haven't been leader since I was five - ah.. the first and only time our choirmaster gave me a solo..~
+  SAY TIRED ~Rest is important for the maintenance of my vocal chords.~
+  SAY BORED ~I suppose waiting around will leave me time to compose an epic masterpiece.~
+  SAY BATTLE_CRY1 ~Your death shall make the first verse!~
+  SAY BATTLE_CRY2 ~LalalaLA!~
+  SAY BATTLE_CRY3 ~Glorious!  Wonderful!  Perhaps a little too gory to be in a children's song..~
+  SAY BATTLE_CRY4 ~Fear not, comrades!~
+  SAY BATTLE_CRY5 ~Your swansong awaits!~
+  SAY DAMAGE ~~
+  SAY DYING ~~
+  SAY HURT ~And thus, fine music shall die, die die...~
+  SAY AREA_FOREST ~Nature is inspiring to me.  The birds make for a fine chorus.  Though for some reason, the squirrels are a little offputting.~
+  SAY AREA_CITY ~The bustle of a city!  The crowds!  ALL shall flock to me when I sing!~
+  SAY AREA_DUNGEON ~I suppose at least the acoustics are good, if the audience is somewhat lacking.~
+  SAY AREA_DAY ~Sunshine on a sunny day/ Is unlike rainclouds on a rainy day.  Poetry!~
+  SAY AREA_NIGHT ~When in darkness, light a match.  I am so profound that sometimes, I can hardly stand it.~
+  SAY SELECT_COMMON1 ~Yes?~
+  SAY SELECT_COMMON2 ~Hmm-mmm-hmmm-mmm...~
+  SAY SELECT_COMMON3 ~You want a sample of my talents?~
+  SAY SELECT_COMMON4 ~Everybody wants a piece of me.  It is the nature of art.~
+  SAY SELECT_COMMON5 ~I'd prefer it if you didn't touch me quite so much.~
+  SAY SELECT_COMMON6 ~I've just lost my train of thought.  Thanks ALOT.~
+  SAY SELECT_ACTION1 ~Nobody appreciates a bard.~
+  SAY SELECT_ACTION2 ~As you wish.~
+  SAY SELECT_ACTION3 ~When in need, just ask!~
+  SAY SELECT_ACTION4 ~I can do that in mime as well!~
+  SAY SELECT_ACTION5 ~No epics shall be written about this task.  I feel it in my bones.~
+  SAY SELECT_ACTION6 ~A task most menial/ Be glad I am genial.  Genius!~
+  SAY SELECT_ACTION7 ~I suppose it's better than having eggs thrown at you.~
+  SAY SELECT_RARE1 ~Should we ever run out of vegetables, I can gather some for you.  They might not be very fresh, though.~
+  SAY SELECT_RARE2 ~It surprises me that nobody has asked for my autograph yet.~
+  SAY CRITICAL_HIT ~Consider yourself the recipient of one of my greatest hits!~
+  SAY CRITICAL_MISS ~Anybody can miss a note now and again.~
+  SAY TARGET_IMMUNE ~No effect?  That reminds me of my last audience.~
+  SAY INVENTORY_FULL ~Is this the way to treat a star?  How can I gesture dramatically when I'm weighed down like the props boy?~
+  SAY PICKED_POCKET ~This shall come in handy should I next be cast as a thief!~
+  SAY HIDDEN_IN_SHADOWS ~This is about as far from the limelight as I can get.  Like a rare and exotic bloom, I shall wilt if kept here too long.~
+//  SAY SPELL_DISRUPTED ~It is RUDE and UNCONSCIONABLE to interrupt an artiste.  Apologise immediately!~
+//  SAY SET_A_TRAP ~Is there no end to my talents?~
+  SAY BIO ~When asked about his past, FONICK motions for you to be quiet.  From his gestures, it appears that he wishes to convey his past in mime.  You gather that he was born in a small pile of ham, just south of WaterShovel.  He has spent years travelling from town to town, singing at doorsteps and taverns to earn his keep.  He considers himself a sounds-like-sack of all trades. On his travels, he has learned various skills, including swordfighting, spellcasting, singing, missile/fire/water/ice/egg-resistance and running away very, very quickly.~
+
+// Assign Delusionist kit to Fonick
+  WRITE_SHORT   0x244 0
+  WRITE_BYTE    0x246 ~%CLFDBARD%~
+  WRITE_BYTE    0x247 0x40
+
+
+///////////////////////////////////
+// Fonick's dialogue assignments //
+///////////////////////////////////
+
+APPEND ~pdialog.2da~
+~CLFHSFNX      CLFHSFNP            CLFHSFNJ           CLFHSFND~
+UNLESS ~CLFHSFNX~
+
+APPEND ~interdia.2da~
+~CLFHSFNX		BCLFHSFN~
+UNLESS ~CLFHSFNX~
+
+///////////////////////
+// Fonick's Epicopus //
+///////////////////////
+
+APPEND ~itemdial.2da~
+   ~CLFHSEPO  88 CLFHSEPO~
+UNLESS ~CLFHSEPO~
+
+COPY ~override\itemdial.2da~ ~override\itemdial.2da~
+ 	REPLACE ~88~ ~Read~
+
+
+///////////////
+// Portraits //
+///////////////
+
+COPY 	~CliffHistory\Portraits\CLFHSFXL.bmp~     ~override~
+       	~CliffHistory\Portraits\CLFHSFXS.bmp~     ~override~
+// FIX: Original copied to ~portraits~ (a file). Must copy to ~portraits/filename~
+// or the portraits directory gets overwritten with a BMP file, breaking Valen,
+// Mur'Neth, Uldar, and any other mod that copies portraits to the directory.
+MKDIR ~portraits~
+COPY 	~CliffHistory\Portraits\CLFHSFXL.bmp~     ~portraits/CLFHSFXL.bmp~
+       	~CliffHistory\Portraits\CLFHSFXS.bmp~     ~portraits/CLFHSFXS.bmp~

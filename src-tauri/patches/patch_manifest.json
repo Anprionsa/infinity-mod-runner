@@ -1,0 +1,421 @@
+[
+  {
+    "id": 1,
+    "name": "Talents of Faerun — SFO Library Fixes",
+    "description": "Fixes ALTER_SCRIPT_BLOCK crash, A7/BD/C#AJAN exclusion in disjunctive_substitution, lib_spl, reroute_stats, alter_script",
+    "target_mod": "dw_talents",
+    "trigger": { "type": "dir_exists", "path": "dw_talents" },
+    "marker": { "file": "dw_talents/sfo/disjunctive_substitution.tph", "text": "A7!GXRU" },
+    "ops": [
+      { "type": "copy", "src": "dw_talents/disjunctive_substitution.tph", "dest": "dw_talents/sfo/disjunctive_substitution.tph" },
+      { "type": "copy", "src": "dw_talents/lib_spl.tph", "dest": "dw_talents/sfo/lib_spl.tph" },
+      { "type": "copy", "src": "dw_talents/reroute_stats.tph", "dest": "dw_talents/lib/reroute_stats.tph" },
+      { "type": "copy", "src": "dw_talents/alter_script.tph", "dest": "dw_talents/sfo/alter_script.tph" }
+    ]
+  },
+  {
+    "id": 2,
+    "name": "Talents of Faerun — IWD Spell Fixes",
+    "description": "Fixes 768-byte idpro313.pro copyover in cd_arcane_post",
+    "target_mod": "dw_talents",
+    "trigger": { "type": "dir_exists", "path": "dw_talents/iwdspells" },
+    "marker": { "file": "dw_talents/iwdspells/lib/cd_arcane_post.tpa", "text": "copyover/WIZARD_LANCE_OF_DISRUPTION" },
+    "ops": [
+      { "type": "copy", "src": "dw_talents/cd_arcane_post.tpa", "dest": "dw_talents/iwdspells/lib/cd_arcane_post.tpa" }
+    ]
+  },
+  {
+    "id": 3,
+    "name": "Talents of Faerun — UI Fixes (HLAs and Subraces)",
+    "description": "HLA regex narrowing, IS_AN_INT guard for subrace UI",
+    "target_mod": "dw_talents",
+    "trigger": { "type": "dir_exists", "path": "dw_talents/sfo/lua" },
+    "marker": { "file": "dw_talents/sfo/lua/ui_add_subraces.tph", "text": "IS_AN_INT" },
+    "ops": [
+      { "type": "copy", "src": "dw_talents/ui_externalize_hlas.tph", "dest": "dw_talents/sfo/lua/ui_externalize_hlas.tph" },
+      { "type": "copy", "src": "dw_talents/ui_add_subraces.tph", "dest": "dw_talents/sfo/lua/ui_add_subraces.tph" }
+    ]
+  },
+  {
+    "id": 4,
+    "name": "Sword Coast Stratagems — SFO Library Fixes",
+    "description": "Same SFO fixes as ToF for SCS's copy of the library",
+    "target_mod": "stratagems",
+    "trigger": { "type": "dir_exists", "path": "stratagems" },
+    "marker": { "file": "stratagems/sfo2e/disjunctive_substitution.tph", "text": "STRING_EQUAL_CASE ~C#AJAN~" },
+    "ops": [
+      { "type": "copy", "src": "stratagems/disjunctive_substitution.tph", "dest": "stratagems/sfo2e/disjunctive_substitution.tph" },
+      { "type": "copy", "src": "stratagems/lib_spl.tph", "dest": "stratagems/sfo2e/lib_spl.tph" },
+      { "type": "copy", "src": "stratagems/alter_script.tph", "dest": "stratagems/sfo2e/alter_script.tph" },
+      { "type": "copy", "src": "stratagems/ui_externalize_hlas.tph", "dest": "stratagems/sfo2e/lua/ui_externalize_hlas.tph" },
+      { "type": "copy", "src": "stratagems/ui_add_subraces.tph", "dest": "stratagems/sfo2e/lua/ui_add_subraces.tph" }
+    ]
+  },
+  {
+    "id": 5,
+    "name": "Sword Coast Stratagems — IWD Spell Fixes",
+    "description": "Fixes idpro313.pro copyover in SCS IWD spells",
+    "target_mod": "stratagems",
+    "trigger": { "type": "dir_exists", "path": "stratagems/iwdspells" },
+    "marker": { "file": "stratagems/iwdspells/lib/cd_arcane_post.tpa", "text": "obg2_res/idpro313.pro" },
+    "ops": [
+      { "type": "copy", "src": "stratagems/cd_arcane_post.tpa", "dest": "stratagems/iwdspells/lib/cd_arcane_post.tpa" }
+    ]
+  },
+  {
+    "id": 6,
+    "name": "IWDification — SFO Library Fixes",
+    "description": "SFO library + IWD spell fixes for IWDification's bundled copy",
+    "target_mod": "IWDification",
+    "trigger": { "type": "dir_exists", "path": "IWDification" },
+    "marker": { "file": "IWDification/sfo/disjunctive_substitution.tph", "text": "STRING_EQUAL_CASE ~C#AJAN~" },
+    "ops": [
+      { "type": "copy", "src": "iwdification/disjunctive_substitution.tph", "dest": "IWDification/sfo/disjunctive_substitution.tph" },
+      { "type": "copy", "src": "iwdification/lib_spl.tph", "dest": "IWDification/sfo/lib_spl.tph" },
+      { "type": "copy", "src": "iwdification/alter_script.tph", "dest": "IWDification/sfo/alter_script.tph" },
+      { "type": "copy", "src": "iwdification/ui_externalize_hlas.tph", "dest": "IWDification/sfo/lua/ui_externalize_hlas.tph" },
+      { "type": "copy", "src": "iwdification/ui_add_subraces.tph", "dest": "IWDification/sfo/lua/ui_add_subraces.tph" },
+      { "type": "copy", "src": "iwdification/cd_arcane_post.tpa", "dest": "IWDification/iwdspells/lib/cd_arcane_post.tpa" }
+    ]
+  },
+  {
+    "id": 7,
+    "name": "Made in Heaven Fixes — SFO Library Fixes",
+    "description": "SFO library fixes for MiH FR's third_party copy",
+    "target_mod": "mih_fr",
+    "trigger": { "type": "dir_exists", "path": "mih_fr" },
+    "marker": { "file": "mih_fr/third_party/sfo2e/disjunctive_substitution.tph", "text": "STRING_EQUAL_CASE ~C#AJAN~" },
+    "ops": [
+      { "type": "copy", "src": "mih_fr/disjunctive_substitution.tph", "dest": "mih_fr/third_party/sfo2e/disjunctive_substitution.tph" },
+      { "type": "copy", "src": "mih_fr/lib_spl.tph", "dest": "mih_fr/third_party/sfo2e/lib_spl.tph" },
+      { "type": "copy", "src": "mih_fr/alter_script.tph", "dest": "mih_fr/third_party/sfo2e/alter_script.tph" },
+      { "type": "copy", "src": "mih_fr/ui_externalize_hlas.tph", "dest": "mih_fr/third_party/sfo2e/lua/ui_externalize_hlas.tph" },
+      { "type": "copy", "src": "mih_fr/ui_add_subraces.tph", "dest": "mih_fr/third_party/sfo2e/lua/ui_add_subraces.tph" }
+    ]
+  },
+  {
+    "id": 8,
+    "name": "Made in Heaven Spell Pack — SFO Library Fixes",
+    "description": "SFO library + IWD spell fixes for MiH SP",
+    "target_mod": "mih_sp",
+    "trigger": { "type": "dir_exists", "path": "mih_sp" },
+    "marker": { "file": "mih_sp/third_party/sfo2e/disjunctive_substitution.tph", "text": "STRING_EQUAL_CASE ~C#AJAN~" },
+    "ops": [
+      { "type": "copy", "src": "mih_sp/disjunctive_substitution.tph", "dest": "mih_sp/third_party/sfo2e/disjunctive_substitution.tph" },
+      { "type": "copy", "src": "mih_sp/lib_spl.tph", "dest": "mih_sp/third_party/sfo2e/lib_spl.tph" },
+      { "type": "copy", "src": "mih_sp/alter_script.tph", "dest": "mih_sp/third_party/sfo2e/alter_script.tph" },
+      { "type": "copy", "src": "mih_sp/cd_arcane_post.tpa", "dest": "mih_sp/third_party/iwdspells/lib/cd_arcane_post.tpa" },
+      { "type": "copy", "src": "mih_sp/ui_externalize_hlas.tph", "dest": "mih_sp/third_party/sfo2e/lua/ui_externalize_hlas.tph" },
+      { "type": "copy", "src": "mih_sp/ui_add_subraces.tph", "dest": "mih_sp/third_party/sfo2e/lua/ui_add_subraces.tph" }
+    ]
+  },
+  {
+    "id": 9,
+    "name": "Made in Heaven Meta-Mod — SFO Library Fixes",
+    "description": "SFO library fixes for MiH Meta-Mod's third_party copy",
+    "target_mod": "mih_metamod",
+    "trigger": { "type": "dir_exists", "path": "mih_metamod" },
+    "marker": { "file": "mih_metamod/third_party/sfo2e/disjunctive_substitution.tph", "text": "STRING_EQUAL_CASE ~C#AJAN~" },
+    "ops": [
+      { "type": "copy", "src": "mih_metamod/disjunctive_substitution.tph", "dest": "mih_metamod/third_party/sfo2e/disjunctive_substitution.tph" },
+      { "type": "copy", "src": "mih_metamod/lib_spl.tph", "dest": "mih_metamod/third_party/sfo2e/lib_spl.tph" },
+      { "type": "copy", "src": "mih_metamod/alter_script.tph", "dest": "mih_metamod/third_party/sfo2e/alter_script.tph" },
+      { "type": "copy", "src": "mih_metamod/ui_externalize_hlas.tph", "dest": "mih_metamod/third_party/sfo2e/lua/ui_externalize_hlas.tph" },
+      { "type": "copy", "src": "mih_metamod/ui_add_subraces.tph", "dest": "mih_metamod/third_party/sfo2e/lua/ui_add_subraces.tph" }
+    ]
+  },
+  {
+    "id": 10,
+    "name": "Akun's Gear — EET Compatibility Fix",
+    "description": "Removes bg2ee from incompatible games list",
+    "target_mod": "akgear",
+    "trigger": { "type": "file_exists", "path": "akgear/laf/errors/!_CheckIEgames.tpa" },
+    "marker": { "file": "akgear/laf/errors/!_CheckIEgames.tpa", "text": "EET compat" },
+    "ops": [
+      { "type": "replace", "file": "akgear/laf/errors/!_CheckIEgames.tpa", "find": "~bg2ee~", "replace": "//~bg2ee~ // EET compat: removed from incompatible list" }
+    ]
+  },
+  {
+    "id": 11,
+    "name": "Angelo — ALWAYS Block Guard Fix",
+    "description": "Changes shared bg2_chapter guard to sv_angelo_always",
+    "target_mod": "angelo",
+    "trigger": { "type": "file_exists", "path": "angelo/setup-angelo.tp2" },
+    "marker": { "file": "angelo/setup-angelo.tp2", "text": "sv_angelo_always" },
+    "ops": [
+      { "type": "copy", "src": "angelo/setup-angelo.tp2", "dest": "angelo/setup-angelo.tp2" }
+    ]
+  },
+  {
+    "id": 12,
+    "name": "Bardic Wonders — BCS Decompile Guard",
+    "description": "Adds BDAERIEC exclusion to BCS decompile loop",
+    "target_mod": "BardicWonders",
+    "trigger": { "type": "file_exists", "path": "BardicWonders/lib/bardsongtweaks.tpa" },
+    "marker": { "file": "BardicWonders/lib/bardsongtweaks.tpa", "text": "BDAERIEC" },
+    "ops": [
+      { "type": "copy", "src": "bardicwonders/bardsongtweaks.tpa", "dest": "BardicWonders/lib/bardsongtweaks.tpa" }
+    ]
+  },
+  {
+    "id": 13,
+    "name": "Boards of Magick — CRE Filename Case Fix",
+    "description": "Renames O!Tal.cre to O!TAL.cre for case-sensitive systems",
+    "target_mod": "BoM",
+    "trigger": { "type": "dir_exists", "path": "BoM/Setup-BoM/cre" },
+    "marker": { "file": "BoM/Setup-BoM/cre/O!TAL.cre", "text": null },
+    "ops": [
+      { "type": "rename", "from": "BoM/Setup-BoM/cre/O!Tal.cre", "to": "BoM/Setup-BoM/cre/O!TAL.cre" }
+    ]
+  },
+  {
+    "id": 14,
+    "name": "BuTcHeRy — ALWAYS Block Guard Fix",
+    "description": "Changes shared bg2_chapter guard to d9_butchery_always",
+    "target_mod": "butchery",
+    "trigger": { "type": "file_exists", "path": "butchery/lib/always.tph" },
+    "marker": { "file": "butchery/lib/always.tph", "text": "d9_butchery_always" },
+    "ops": [
+      { "type": "copy", "src": "butchery/always.tph", "dest": "butchery/lib/always.tph" }
+    ]
+  },
+  {
+    "id": 15,
+    "name": "Ehlastra — Translation Path Fix",
+    "description": "Fixes translation path (wheels/tra → wheels/lang)",
+    "target_mod": "Ehlastra",
+    "trigger": { "type": "file_exists", "path": "Ehlastra/Ehlastra.tp2" },
+    "marker": { "file": "Ehlastra/Ehlastra.tp2", "text": "wheels/lang/%s/balthadd.tra" },
+    "ops": [
+      { "type": "replace", "file": "Ehlastra/Ehlastra.tp2", "find": "wheels/tra/%s/balthadd.tra", "replace": "wheels/lang/%s/balthadd.tra" }
+    ]
+  },
+  {
+    "id": 16,
+    "name": "Kale — Isaac Crossmod Removal",
+    "description": "Removes unreleased X3Isaac NPC crossmod references from Emily.d",
+    "target_mod": "Kale",
+    "trigger": { "type": "file_exists", "path": "Kale/Dialogue/CrossMod/Emily.d" },
+    "marker": { "file": "Kale/Dialogue/CrossMod/Emily.d", "text": "X3Isaac", "invert": true },
+    "ops": [
+      { "type": "copy", "src": "kale/Emily.d", "dest": "Kale/Dialogue/CrossMod/Emily.d" }
+    ]
+  },
+  {
+    "id": 17,
+    "name": "Longer Road — Jaheira Script Fix",
+    "description": "Removes JAH_NO_JON REPLACE_BCS_BLOCK that fails with Jaheira Recast",
+    "target_mod": "LongerRoad",
+    "trigger": { "type": "file_exists", "path": "LongerRoad/LongerRoad.tp2" },
+    "marker": { "file": "LongerRoad/LongerRoad.tp2", "text": "JAH_NO_JON", "invert": true },
+    "ops": [
+      { "type": "copy", "src": "longerroad/LongerRoad.tp2", "dest": "LongerRoad/LongerRoad.tp2" }
+    ]
+  },
+  {
+    "id": 18,
+    "name": "The Darkest Day — Spell Reference Fix",
+    "description": "Replaces SUMMON_SKELETON_WARRIOR3 with CLERIC_ANIMATE_DEAD",
+    "target_mod": "TDDz",
+    "trigger": { "type": "file_exists", "path": "TDDz/_ONSETOfTheDARKESTDAY/BAF/DDGAME03.BAF" },
+    "marker": { "file": "TDDz/_ONSETOfTheDARKESTDAY/BAF/DDGAME03.BAF", "text": "CLERIC_ANIMATE_DEAD" },
+    "ops": [
+      { "type": "replace", "file": "TDDz/_ONSETOfTheDARKESTDAY/BAF/DDGAME03.BAF", "find": "SUMMON_SKELETON_WARRIOR3", "replace": "CLERIC_ANIMATE_DEAD" }
+    ]
+  },
+  {
+    "id": 19,
+    "name": "Shades of the Sword Coast — CRE Filename Fix",
+    "description": "Renames spidsm01.cre to SPIDSM0_.cre (upstream filename mismatch)",
+    "target_mod": "SotSC",
+    "trigger": { "type": "dir_exists", "path": "SotSC/NoSoDFixes" },
+    "marker": { "file": "SotSC/NoSoDFixes/SPIDSM0_.cre", "text": null },
+    "ops": [
+      { "type": "rename", "from": "SotSC/NoSoDFixes/spidsm01.cre", "to": "SotSC/NoSoDFixes/SPIDSM0_.cre" }
+    ]
+  },
+  {
+    "id": 20,
+    "name": "Shadow Magic — Pre-copy Resource Files",
+    "description": "Pre-copies MEWI*.txt files to game override/ for ClassSpellTool",
+    "target_mod": "shadowadept",
+    "trigger": { "type": "dir_exists", "path": "shadowadept/no_overwrite" },
+    "marker": { "file": null, "text": null, "check_game_file": "override/MEWI1.txt" },
+    "ops": [
+      { "type": "copy_to_game", "src_mod": "shadowadept/no_overwrite/MEWI1.txt", "dest_game": "override/MEWI1.txt" },
+      { "type": "copy_to_game", "src_mod": "shadowadept/no_overwrite/MEWI2.txt", "dest_game": "override/MEWI2.txt" },
+      { "type": "copy_to_game", "src_mod": "shadowadept/no_overwrite/MEWI3.txt", "dest_game": "override/MEWI3.txt" },
+      { "type": "copy_to_game", "src_mod": "shadowadept/no_overwrite/MEWI4.txt", "dest_game": "override/MEWI4.txt" },
+      { "type": "copy_to_game", "src_mod": "shadowadept/no_overwrite/MEWI5.txt", "dest_game": "override/MEWI5.txt" },
+      { "type": "copy_to_game", "src_mod": "shadowadept/no_overwrite/MEWI6.txt", "dest_game": "override/MEWI6.txt" },
+      { "type": "copy_to_game", "src_mod": "shadowadept/no_overwrite/MEWI7.txt", "dest_game": "override/MEWI7.txt" },
+      { "type": "copy_to_game", "src_mod": "shadowadept/no_overwrite/MEWI8.txt", "dest_game": "override/MEWI8.txt" },
+      { "type": "copy_to_game", "src_mod": "shadowadept/no_overwrite/MEWI9.txt", "dest_game": "override/MEWI9.txt" }
+    ]
+  },
+  {
+    "id": 21,
+    "name": "Breagar (ACBre) — EET English Language Fix",
+    "description": "Uses hardcoded state numbers instead of STATE_WHICH_SAYS for EET",
+    "target_mod": "ACBre",
+    "trigger": { "type": "file_exists", "path": "ACBre/lib/ac_bre_cpmvars.tpa" },
+    "marker": { "file": "ACBre/lib/ac_bre_cpmvars.tpa", "text": "EET preserves BGEE" },
+    "ops": [
+      { "type": "copy", "src": "acbre/ac_bre_cpmvars.tpa", "dest": "ACBre/lib/ac_bre_cpmvars.tpa" }
+    ]
+  },
+  {
+    "id": 22,
+    "name": "Made in Heaven Spell Pack — Animate Dead Scrolls Fix",
+    "description": "LAUNCH_PATCH_FUNCTION replaced with LPF for struct_read",
+    "target_mod": "mih_sp",
+    "trigger": { "type": "file_exists", "path": "mih_sp/animate_dead/animate_dead_scrolls.tpa" },
+    "marker": { "file": "mih_sp/animate_dead/animate_dead_scrolls.tpa", "text": "LPF struct_read" },
+    "ops": [
+      { "type": "copy", "src": "mih_sp_animate_dead/animate_dead_scrolls.tpa", "dest": "mih_sp/animate_dead/animate_dead_scrolls.tpa" }
+    ]
+  },
+  {
+    "id": 23,
+    "name": "Trials of the Luremaster — Container Bounds Fix",
+    "description": "Adds container count bounds check in spells_player.tph",
+    "target_mod": "A7-TotLM-BG2EE",
+    "trigger": { "type": "file_exists", "path": "A7-TotLM-BG2EE/lib/spells_player.tph" },
+    "marker": { "file": "A7-TotLM-BG2EE/lib/spells_player.tph", "text": "are_container_count" },
+    "ops": [
+      { "type": "copy", "src": "A7-TotLM-BG2EE/spells_player.tph", "dest": "A7-TotLM-BG2EE/lib/spells_player.tph" }
+    ]
+  },
+  {
+    "id": 24,
+    "name": "Portraits Directory — Create Missing Directory",
+    "description": "Creates portraits/ directory so mods can COPY portrait files without crashing",
+    "target_mod": null,
+    "trigger": { "type": "always" },
+    "marker": { "file": null, "text": null, "check_game_dir": "portraits" },
+    "ops": [
+      { "type": "mkdir", "path": "portraits" }
+    ]
+  },
+  {
+    "id": 25,
+    "name": "Talents of Faerun — Weapon Proficiency Kit Fix",
+    "description": "Adds vanilla specialty priest kits (ohtempus, ohtyr, etc.) to kitweapons.ini",
+    "target_mod": "dw_talents",
+    "trigger": { "type": "file_exists", "path": "dw_talents/prof/data/kitweapons.ini" },
+    "marker": { "file": "dw_talents/prof/data/kitweapons.ini", "text": "OHTEMPUS" },
+    "ops": [
+      { "type": "copy", "src": "dw_talents_prof/kitweapons.ini", "dest": "dw_talents/prof/data/kitweapons.ini" }
+    ]
+  },
+  {
+    "id": 26,
+    "name": "TB#Tweaks — BCS Decompile Guard",
+    "description": "Adds A7/BD/C#AJAN exclusion to impdiff.tpa difficulty system",
+    "target_mod": "tb#tweaks",
+    "trigger": { "type": "file_exists", "path": "tb#tweaks/lib/impdiff.tpa" },
+    "marker": { "file": "tb#tweaks/lib/impdiff.tpa", "text": "A7[#!\\-]" },
+    "ops": [
+      { "type": "copy", "src": "tb_tweaks/impdiff.tpa", "dest": "tb#tweaks/lib/impdiff.tpa" }
+    ]
+  },
+  {
+    "id": 27,
+    "name": "Bart_Tweaks — SPL File Size Guard",
+    "description": "Changes SOURCE_SIZE guard from 0x72 to 0x82 in display_range.tpa",
+    "target_mod": "Bart_Tweaks",
+    "trigger": { "type": "file_exists", "path": "Bart_Tweaks/lib/display_range.tpa" },
+    "marker": { "file": "Bart_Tweaks/lib/display_range.tpa", "text": "0x82" },
+    "ops": [
+      { "type": "copy", "src": "bart_tweaks/display_range.tpa", "dest": "Bart_Tweaks/lib/display_range.tpa" }
+    ]
+  },
+  {
+    "id": 28,
+    "name": "Cliffette's History — Portraits Directory Fix",
+    "description": "Uses MKDIR + explicit filenames instead of bare directory COPY",
+    "target_mod": "cliffhistory",
+    "trigger": { "type": "file_exists", "path": "cliffhistory/setup-cliffhistory.tp2" },
+    "marker": { "file": "cliffhistory/setup-cliffhistory.tp2", "text": "MKDIR" },
+    "ops": [
+      { "type": "copy", "src": "cliffhistory/setup-cliffhistory.tp2", "dest": "cliffhistory/setup-cliffhistory.tp2" }
+    ]
+  },
+  {
+    "id": 29,
+    "name": "MiH Meta-Mod — Preserve EET.flag + IDS + BCS During Cleanup",
+    "description": "CRITICAL: Prevents cleanup from biffing/deleting EET.flag, .IDS, and .BCS files. Biffed BCS/IDS files become corrupt and break EET_end and post-EET mods.",
+    "target_mod": "mih_metamod",
+    "trigger": { "type": "file_exists", "path": "mih_metamod/cleanup/cleanup_override.tpa" },
+    "marker": { "file": "mih_metamod/cleanup/cleanup_override.tpa", "text": "_eetmr_preserve" },
+    "ops": [
+      { "type": "copy", "src": "mih_metamod_cleanup/cleanup_override.tpa", "dest": "mih_metamod/cleanup/cleanup_override.tpa" }
+    ]
+  },
+  {
+    "id": 30,
+    "name": "5E Spellcasting — BCS Script Guard",
+    "description": "Skips corrupted NPC scripts (C#AJAN, BD*, A7*) in EXTEND_TOP loop",
+    "target_mod": "5E_spellcasting",
+    "trigger": { "type": "file_exists", "path": "5E_spellcasting/lib/semi_spontaneous.tpa" },
+    "marker": { "file": "5E_spellcasting/lib/semi_spontaneous.tpa", "text": "C#AJAN" },
+    "ops": [
+      { "type": "copy", "src": "5E_spellcasting/semi_spontaneous.tpa", "dest": "5E_spellcasting/lib/semi_spontaneous.tpa" }
+    ]
+  },
+  {
+    "id": 31,
+    "name": "Animal Companions — DestroySelf Parse Error Fix",
+    "description": "Fixes DestroySelf(5) call in UBRPET.d — DestroySelf takes no arguments",
+    "target_mod": "AnimalCompanions",
+    "trigger": { "type": "file_exists", "path": "AnimalCompanions/files3/UBRPET.d" },
+    "marker": { "file": "AnimalCompanions/files3/UBRPET.d", "text": "DestroySelf(5)", "invert": true },
+    "ops": [
+      { "type": "replace", "file": "AnimalCompanions/files3/UBRPET.d", "find": "DestroySelf(5)", "replace": "DestroySelf()" }
+    ]
+  },
+  {
+    "id": 32,
+    "name": "Animal Companions — Remove ACTION_READLN Prompts",
+    "description": "Replaces interactive druid/name prompts with defaults for automated install (druid=1, name=Companion)",
+    "target_mod": "AnimalCompanions",
+    "trigger": { "type": "file_exists", "path": "AnimalCompanions/Setup-AnimalCompanions.tp2" },
+    "marker": { "file": "AnimalCompanions/Setup-AnimalCompanions.tp2", "text": "EET Mod Forge Patch: Replaced ACTION_READLN" },
+    "ops": [
+      { "type": "copy", "src": "animalcompanions/Setup-AnimalCompanions.tp2", "dest": "AnimalCompanions/Setup-AnimalCompanions.tp2" }
+    ]
+  },
+  {
+    "id": 33,
+    "name": "Thalantyr Item Upgrade — TRA Reload Fix",
+    "description": "Adds LOAD_TRA for thalan.tra after charset conversion to prevent missing string errors",
+    "target_mod": "thalan",
+    "trigger": { "type": "file_exists", "path": "thalan/thalan.tp2" },
+    "marker": { "file": "thalan/thalan.tp2", "text": "LOAD_TRA" },
+    "ops": [
+      { "type": "replace", "file": "thalan/thalan.tp2", "find": "    INCLUDE ~%MOD_FOLDER%/lib/BG1TotSCPolishCustomEncoding.tpa~\n  END\nEND", "replace": "    INCLUDE ~%MOD_FOLDER%/lib/BG1TotSCPolishCustomEncoding.tpa~\n  END\n  LOAD_TRA \"%out_path%/%LANGUAGE%/thalan.tra\"\nEND" }
+    ]
+  },
+  {
+    "id": 34,
+    "name": "ACTION.IDS — Pre-populate RemoveSpellRES(S:Spell*)",
+    "description": "IDS pre-population (EET_end + A7-MagicStore). Prevents 56+ mods from appending duplicate entries. Only applies after early mods create override/ACTION.IDS.",
+    "target_mod": null,
+    "trigger": { "type": "file_exists_game", "path": "override/ACTION.IDS" },
+    "marker": { "file": null, "text": null, "check_game_file_contains": { "file": "override/ACTION.IDS", "text": "RemoveSpellRES(S:Spell*)" } },
+    "ops": [
+      { "type": "append_to_game", "file": "override/ACTION.IDS", "line": "147 RemoveSpellRES(S:Spell*)", "unless": "RemoveSpellRES(S:Spell*)" }
+    ]
+  },
+  {
+    "id": 35,
+    "name": "TRIGGER.IDS — Pre-populate HaveSpellRES(S:Spell*)",
+    "description": "IDS pre-population (EET_end + A7-MagicStore). Prevents 30+ mods from appending duplicate entries. Only applies after early mods create override/TRIGGER.IDS.",
+    "target_mod": null,
+    "trigger": { "type": "file_exists_game", "path": "override/TRIGGER.IDS" },
+    "marker": { "file": null, "text": null, "check_game_file_contains": { "file": "override/TRIGGER.IDS", "text": "HaveSpellRES(S:Spell*)" } },
+    "ops": [
+      { "type": "append_to_game", "file": "override/TRIGGER.IDS", "line": "0x4031 HaveSpellRES(S:Spell*)", "unless": "HaveSpellRES(S:Spell*)" }
+    ]
+  }
+]
