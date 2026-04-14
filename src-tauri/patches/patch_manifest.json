@@ -417,5 +417,183 @@
     "ops": [
       { "type": "append_to_game", "file": "override/TRIGGER.IDS", "line": "0x4031 HaveSpellRES(S:Spell*)", "unless": "HaveSpellRES(S:Spell*)" }
     ]
+  },
+  {
+    "id": 36,
+    "name": "dw_talents reroute_stats — BCS round-trip safety",
+    "description": "Replaces reroute_stats.tph with version that wraps all three DECOMPILE_AND_PATCH calls in PATCH_TRY.",
+    "target_mod": "dw_talents",
+    "trigger": { "type": "file_exists", "path": "dw_talents/lib/reroute_stats.tph" },
+    "marker": { "file": "dw_talents/lib/reroute_stats.tph", "text": "_eetmr_bcs_safety" },
+    "ops": [
+      { "type": "copy", "src": "dw_talents/reroute_stats.tph", "dest": "dw_talents/lib/reroute_stats.tph" }
+    ]
+  },
+  {
+    "id": 37,
+    "name": "dw_talents lib_spl — BCS round-trip safety",
+    "description": "Wraps the _DW_OLD remap DECOMPILE_AND_PATCH in PATCH_TRY to prevent BCS corruption.",
+    "target_mod": "dw_talents",
+    "trigger": { "type": "file_exists", "path": "dw_talents/sfo/lib_spl.tph" },
+    "marker": { "file": "dw_talents/sfo/lib_spl.tph", "text": "_eetmr_bcs_safety" },
+    "ops": [
+      { "type": "replace", "file": "dw_talents/sfo/lib_spl.tph",
+        "find": "COPY_EXISTING_REGEXP \".*\\.bcs\" override\n\tPATCH_IF NOT (\n\t\t~%SOURCE_RES%~ STRING_COMPARE_REGEXP ~BD.*~ = 0 OR ~%SOURCE_RES%~ STRING_EQUAL_CASE ~C#AJAN~\n\t\tOR ~%SOURCE_RES%~ STRING_EQUAL_CASE ~A7!GXRU~\n\t) BEGIN\n\t\tDECOMPILE_AND_PATCH BEGIN\n\t\t\tREPLACE_TEXTUALLY \"_DW_OLD\" \"\"\n\t\tEND\n\tEND\nBUT_ONLY",
+        "replace": "// _eetmr_bcs_safety: wrapped DECOMPILE_AND_PATCH in PATCH_TRY for round-trip safety\nCOPY_EXISTING_REGEXP \".*\\.bcs\" override\n\tPATCH_IF NOT (\n\t\t~%SOURCE_RES%~ STRING_COMPARE_REGEXP ~BD.*~ = 0 OR ~%SOURCE_RES%~ STRING_EQUAL_CASE ~C#AJAN~\n\t\tOR ~%SOURCE_RES%~ STRING_EQUAL_CASE ~A7!GXRU~\n\t) BEGIN\n\t\tPATCH_IF INDEX_BUFFER (\"_DW_OLD\") >= 0 BEGIN\n\t\t\tPATCH_TRY\n\t\t\t\tDECOMPILE_AND_PATCH BEGIN\n\t\t\t\t\tREPLACE_TEXTUALLY \"_DW_OLD\" \"\"\n\t\t\t\tEND\n\t\t\tWITH DEFAULT END\n\t\tEND\n\tEND\nBUT_ONLY" }
+    ]
+  },
+  {
+    "id": 38,
+    "name": "SCS lib_spl — BCS round-trip safety",
+    "description": "Same fix as patch #37 but for SCS's copy of lib_spl.tph.",
+    "target_mod": "stratagems",
+    "trigger": { "type": "file_exists", "path": "stratagems/sfo2e/lib_spl.tph" },
+    "marker": { "file": "stratagems/sfo2e/lib_spl.tph", "text": "_eetmr_bcs_safety" },
+    "ops": [
+      { "type": "replace", "file": "stratagems/sfo2e/lib_spl.tph",
+        "find": "COPY_EXISTING_REGEXP \".*\\.bcs\" override\n\tPATCH_IF NOT (\n\t\t~%SOURCE_RES%~ STRING_COMPARE_REGEXP ~BD.*~ = 0 OR ~%SOURCE_RES%~ STRING_EQUAL_CASE ~C#AJAN~\n\t\tOR ~%SOURCE_RES%~ STRING_EQUAL_CASE ~A7!GXRU~\n\t) BEGIN\n\t\tDECOMPILE_AND_PATCH BEGIN\n\t\t\tREPLACE_TEXTUALLY \"_DW_OLD\" \"\"\n\t\tEND\n\tEND\nBUT_ONLY",
+        "replace": "// _eetmr_bcs_safety: wrapped DECOMPILE_AND_PATCH in PATCH_TRY for round-trip safety\nCOPY_EXISTING_REGEXP \".*\\.bcs\" override\n\tPATCH_IF NOT (\n\t\t~%SOURCE_RES%~ STRING_COMPARE_REGEXP ~BD.*~ = 0 OR ~%SOURCE_RES%~ STRING_EQUAL_CASE ~C#AJAN~\n\t\tOR ~%SOURCE_RES%~ STRING_EQUAL_CASE ~A7!GXRU~\n\t) BEGIN\n\t\tPATCH_IF INDEX_BUFFER (\"_DW_OLD\") >= 0 BEGIN\n\t\t\tPATCH_TRY\n\t\t\t\tDECOMPILE_AND_PATCH BEGIN\n\t\t\t\t\tREPLACE_TEXTUALLY \"_DW_OLD\" \"\"\n\t\t\t\tEND\n\t\t\tWITH DEFAULT END\n\t\tEND\n\tEND\nBUT_ONLY" }
+    ]
+  },
+  {
+    "id": 39,
+    "name": "SCS lib_bcs — BCS round-trip safety",
+    "description": "Wraps the core BCS editor DECOMPILE_AND_PATCH in PATCH_TRY. Prevents corruption of scripts that can't round-trip.",
+    "target_mod": "stratagems",
+    "trigger": { "type": "file_exists", "path": "stratagems/sfo/filetype/lib_bcs.tpa" },
+    "marker": { "file": "stratagems/sfo/filetype/lib_bcs.tpa", "text": "_eetmr_bcs_safety" },
+    "ops": [
+      { "type": "replace", "file": "stratagems/sfo/filetype/lib_bcs.tpa",
+        "find": "       COPY_EXISTING_REGEXP GLOB \".*\\.bcs\" override\n             SPRINT filename \"%SOURCE_RES%\"\n             DECOMPILE_AND_PATCH BEGIN\n                LPF process_baf STR_VAR editstring filename END\n             END\n       BUT_ONLY",
+        "replace": "       // _eetmr_bcs_safety: wrapped DECOMPILE_AND_PATCH in PATCH_TRY for round-trip safety\n       COPY_EXISTING_REGEXP GLOB \".*\\.bcs\" override\n             SPRINT filename \"%SOURCE_RES%\"\n             PATCH_TRY\n                DECOMPILE_AND_PATCH BEGIN\n                   LPF process_baf STR_VAR editstring filename END\n                END\n             WITH DEFAULT\n                PATCH_PRINT ~WARNING: [%SOURCE_FILE%] BCS round-trip failed, skipping~\n             END\n       BUT_ONLY" }
+    ]
+  },
+  {
+    "id": 40,
+    "name": "SCS research_iwd_scripts — BCS round-trip safety",
+    "description": "Wraps the IWD spell script explorer DECOMPILE_AND_PATCH in PATCH_TRY.",
+    "target_mod": "stratagems",
+    "trigger": { "type": "file_exists", "path": "stratagems/lib/research_iwd_scripts.tph" },
+    "marker": { "file": "stratagems/lib/research_iwd_scripts.tph", "text": "_eetmr_bcs_safety" },
+    "ops": [
+      { "type": "replace", "file": "stratagems/lib/research_iwd_scripts.tph",
+        "find": "   COPY_EXISTING_REGEXP GLOB \".*\\.bcs\" override\n         DECOMPILE_AND_PATCH BEGIN\n            PATCH_IF (INDEX_BUFFER(\"HaveSpell(\")>=0) BEGIN\n               LPF log_this STR_VAR file=spell_scripts.txt input=\"%SOURCE_RES%\" END\n               counter +=1\n            END\n         END\n   BUT_ONLY",
+        "replace": "   // _eetmr_bcs_safety: wrapped DECOMPILE_AND_PATCH in PATCH_TRY for round-trip safety\n   COPY_EXISTING_REGEXP GLOB \".*\\.bcs\" override\n         PATCH_TRY\n            DECOMPILE_AND_PATCH BEGIN\n               PATCH_IF (INDEX_BUFFER(\"HaveSpell(\")>=0) BEGIN\n                  LPF log_this STR_VAR file=spell_scripts.txt input=\"%SOURCE_RES%\" END\n                  counter +=1\n               END\n            END\n         WITH DEFAULT\n            PATCH_PRINT ~WARNING: [%SOURCE_FILE%] BCS round-trip failed, skipping~\n         END\n   BUT_ONLY" }
+    ]
+  },
+  {
+    "id": 41,
+    "name": "EET_end — ARE size guard",
+    "description": "Adds a SOURCE_SIZE check before READ_SHORT 0x48 in EET_end's ARE scanning loop. Prevents crash on undersized ARE files (e.g. A7#127.ARE = 52 bytes from Golem Construction).",
+    "target_mod": "EET_end",
+    "trigger": { "type": "file_exists", "path": "EET_end/EET_end.tp2" },
+    "marker": { "file": "EET_end/EET_end.tp2", "text": "_eetmr_are_guard" },
+    "ops": [
+      { "type": "replace", "file": "EET_end/EET_end.tp2",
+        "find": "COPY_EXISTING_REGEXP GLOB ~.*\\.ARE~ ~override~\n\tREAD_SHORT 0x48 flags",
+        "replace": "// _eetmr_are_guard: skip undersized ARE files that would crash READ_SHORT 0x48\nCOPY_EXISTING_REGEXP GLOB ~.*\\.ARE~ ~override~\n\tSET flags = 0\n\tPATCH_IF SOURCE_SIZE >= 0x4a BEGIN READ_SHORT 0x48 flags END" }
+    ]
+  },
+  {
+    "id": 42,
+    "name": "EET_end — BCS round-trip safety",
+    "description": "Wraps EET_end's DECOMPILE_AND_PATCH on all BCS files in PATCH_TRY. Prevents crash on scripts that can't round-trip (e.g. A7!GXRU.BCS from Golem Construction).",
+    "target_mod": "EET_end",
+    "trigger": { "type": "file_exists", "path": "EET_end/EET_end.tp2" },
+    "marker": { "file": "EET_end/EET_end.tp2", "text": "_eetmr_bcs_guard" },
+    "ops": [
+      { "type": "replace", "file": "EET_end/EET_end.tp2",
+        "find": "COPY_EXISTING_REGEXP GLOB ~.+\\.BCS$~ ~override~\n\tDECOMPILE_AND_PATCH BEGIN\n\t\tREPLACE_EVALUATE CASE_INSENSITIVE ~\\([Tt]Dialog[A-Za-z]*(\"\\)\\([^\"]+\\)\"~ BEGIN SPRINT match ~%MATCH2%~ SPRINT res ~dlg~ LPM EET_PCU_outer_res END ~\\1%match%\"~\n\tEND\nBUT_ONLY",
+        "replace": "// _eetmr_bcs_guard: wrapped DECOMPILE_AND_PATCH in PATCH_TRY for round-trip safety\nCOPY_EXISTING_REGEXP GLOB ~.+\\.BCS$~ ~override~\n\tPATCH_TRY\n\t\tDECOMPILE_AND_PATCH BEGIN\n\t\t\tREPLACE_EVALUATE CASE_INSENSITIVE ~\\([Tt]Dialog[A-Za-z]*(\"\\)\\([^\"]+\\)\"~ BEGIN SPRINT match ~%MATCH2%~ SPRINT res ~dlg~ LPM EET_PCU_outer_res END ~\\1%match%\"~\n\t\tEND\n\tWITH DEFAULT\n\t\tPATCH_PRINT ~WARNING: [%SOURCE_FILE%] BCS round-trip failed, skipping~\n\tEND\nBUT_ONLY" }
+    ]
+  },
+  {
+    "id": 43,
+    "name": "EET_end — DLG round-trip safety",
+    "description": "Wraps EET_end's DECOMPILE_AND_PATCH on all DLG files in PATCH_TRY. Prevents crash on dialogues that can't round-trip.",
+    "target_mod": "EET_end",
+    "trigger": { "type": "file_exists", "path": "EET_end/EET_end.tp2" },
+    "marker": { "file": "EET_end/EET_end.tp2", "text": "_eetmr_dlg_guard" },
+    "ops": [
+      { "type": "replace", "file": "EET_end/EET_end.tp2",
+        "find": "COPY_EXISTING_REGEXP GLOB ~.+\\.DLG$~ ~override~\n\tDECOMPILE_AND_PATCH BEGIN\n\t\tPHP_EACH remapped_states AS file => state BEGIN\n\t\t\tREPLACE_EVALUATE CASE_INSENSITIVE ~\\( EXTERN .\\)%file%\\(. \\)\\([0-9]+\\)~ BEGIN\n\t\t\t\tSET match = state + MATCH3\n\t\t\t\tPATCH_PRINT ~Patching %SOURCE_FILESPEC%: %file% => %file_1% - dlg; %MATCH3% => %match% - state~\n\t\t\tEND ~%MATCH1%%file_1%%MATCH2%%match%~\n\t\tEND\n\t\tREPLACE_EVALUATE CASE_INSENSITIVE ~\\([Tt]Dialog[A-Za-z]*(\"\\)\\([^\"]+\\)\"~ BEGIN SPRINT match ~%MATCH2%~ SPRINT res ~dlg~ LPM EET_PCU_outer_res END ~\\1%match%\"~\n\tEND\nBUT_ONLY",
+        "replace": "// _eetmr_dlg_guard: wrapped DECOMPILE_AND_PATCH in PATCH_TRY for round-trip safety\nCOPY_EXISTING_REGEXP GLOB ~.+\\.DLG$~ ~override~\n\tPATCH_TRY\n\t\tDECOMPILE_AND_PATCH BEGIN\n\t\t\tPHP_EACH remapped_states AS file => state BEGIN\n\t\t\t\tREPLACE_EVALUATE CASE_INSENSITIVE ~\\( EXTERN .\\)%file%\\(. \\)\\([0-9]+\\)~ BEGIN\n\t\t\t\t\tSET match = state + MATCH3\n\t\t\t\t\tPATCH_PRINT ~Patching %SOURCE_FILESPEC%: %file% => %file_1% - dlg; %MATCH3% => %match% - state~\n\t\t\t\tEND ~%MATCH1%%file_1%%MATCH2%%match%~\n\t\t\tEND\n\t\t\tREPLACE_EVALUATE CASE_INSENSITIVE ~\\([Tt]Dialog[A-Za-z]*(\"\\)\\([^\"]+\\)\"~ BEGIN SPRINT match ~%MATCH2%~ SPRINT res ~dlg~ LPM EET_PCU_outer_res END ~\\1%match%\"~\n\t\tEND\n\tWITH DEFAULT\n\t\tPATCH_PRINT ~WARNING: [%SOURCE_FILE%] DLG round-trip failed, skipping~\n\tEND\nBUT_ONLY" }
+    ]
+  },
+  {
+    "id": 44,
+    "name": "MESpells — BCS round-trip safety",
+    "description": "Wraps MESpells Stoneskin DECOMPILE_AND_PATCH on all BCS files in PATCH_TRY.",
+    "target_mod": "MESpells",
+    "trigger": { "type": "file_exists", "path": "MESpells/MESpells.tp2" },
+    "marker": { "file": "MESpells/MESpells.tp2", "text": "_eetmr_bcs_guard" },
+    "ops": [
+      { "type": "replace", "file": "MESpells/MESpells.tp2",
+        "find": "COPY_EXISTING_REGEXP ~.*\\.bcs~ ~override~\n\tDECOMPILE_AND_PATCH BEGIN\n\t\tREPLACE_TEXTUALLY CASE_INSENSITIVE ~\\(CheckStat[LG]?T?([^,]+, *[0-9]+\\), *STONESKINS)~ ~\\1,635)~\n\tEND\n\tBUT_ONLY_IF_IT_CHANGES",
+        "replace": "// _eetmr_bcs_guard: wrapped DECOMPILE_AND_PATCH in PATCH_TRY\nCOPY_EXISTING_REGEXP ~.*\\.bcs~ ~override~\n\tPATCH_TRY\n\t\tDECOMPILE_AND_PATCH BEGIN\n\t\t\tREPLACE_TEXTUALLY CASE_INSENSITIVE ~\\(CheckStat[LG]?T?([^,]+, *[0-9]+\\), *STONESKINS)~ ~\\1,635)~\n\t\tEND\n\tWITH DEFAULT\n\t\tPATCH_PRINT ~WARNING: [%SOURCE_FILE%] BCS round-trip failed, skipping~\n\tEND\n\tBUT_ONLY_IF_IT_CHANGES" }
+    ]
+  },
+  {
+    "id": 45,
+    "name": "DSotSC — restore missing source BMPs + COPY_LARGE",
+    "description": "A previous MOVE operation consumed ar4600sr.bmp/ar8900sr.bmp (renamed them to bg5500sr/bg2400sr). Restore sources from destinations and use COPY_LARGE to make it idempotent.",
+    "target_mod": "DSotSC",
+    "trigger": { "type": "file_exists", "path": "DSotSC/DSotSC.tp2" },
+    "marker": { "file": "DSotSC/DSotSC.tp2", "text": "_eetmr_move_fix" },
+    "ops": [
+      { "type": "copy_if_missing", "src": "DSotSC/base/bmp/bg5500sr.bmp", "dest": "DSotSC/base/bmp/ar4600sr.bmp" },
+      { "type": "copy_if_missing", "src": "DSotSC/base/bmp/bg2400sr.bmp", "dest": "DSotSC/base/bmp/ar8900sr.bmp" },
+      { "type": "replace", "file": "DSotSC/DSotSC.tp2",
+        "find": "ACTION_IF GAME_IS ~eet~ BEGIN\n\tMOVE ~DSotSC/base/bmp/ar4600sr.bmp~ ~DSotSC/base/bmp/bg5500sr.bmp~\n\t~DSotSC/base/bmp/ar8900sr.bmp~ ~DSotSC/base/bmp/bg2400sr.bmp~",
+        "replace": "// _eetmr_move_fix: replaced MOVE with COPY_LARGE (idempotent, survives retries)\nACTION_IF GAME_IS ~eet~ BEGIN\n\tCOPY_LARGE ~DSotSC/base/bmp/ar4600sr.bmp~ ~DSotSC/base/bmp/bg5500sr.bmp~\n\tCOPY_LARGE ~DSotSC/base/bmp/ar8900sr.bmp~ ~DSotSC/base/bmp/bg2400sr.bmp~" }
+    ]
+  },
+  {
+    "id": 46,
+    "name": "NTotSC — restore missing source BMPs + COPY_LARGE",
+    "description": "Same fix as DSotSC #45 — restore missing source BMPs then make MOVE idempotent with COPY_LARGE.",
+    "target_mod": "ntotsc",
+    "trigger": { "type": "file_exists", "path": "ntotsc/ntotsc.tp2" },
+    "marker": { "file": "ntotsc/ntotsc.tp2", "text": "_eetmr_move_fix" },
+    "ops": [
+      { "type": "copy_if_missing", "src": "ntotsc/base/bmp/BG0400sr.bmp", "dest": "ntotsc/base/bmp/ar0400sr.bmp" },
+      { "type": "copy_if_missing", "src": "ntotsc/base/bmp/BG2400sr.bmp", "dest": "ntotsc/base/bmp/ar8900sr.bmp" },
+      { "type": "replace", "file": "ntotsc/NTotSC.tp2",
+        "find": "ACTION_IF GAME_IS ~eet~ BEGIN\n\tMOVE ~ntotsc/base/bmp/ar0400sr.bmp~ ~NTotSC/base/bmp/BG0400sr.bmp~\n\t~ntotsc/base/bmp/ar8900sr.bmp~ ~NTotSC/base/bmp/BG2400sr.bmp~",
+        "replace": "// _eetmr_move_fix: replaced MOVE with COPY_LARGE (idempotent, survives retries)\nACTION_IF GAME_IS ~eet~ BEGIN\n\tCOPY_LARGE ~ntotsc/base/bmp/ar0400sr.bmp~ ~NTotSC/base/bmp/BG0400sr.bmp~\n\tCOPY_LARGE ~ntotsc/base/bmp/ar8900sr.bmp~ ~NTotSC/base/bmp/BG2400sr.bmp~" }
+    ]
+  },
+  {
+    "id": 47,
+    "name": "bristlelick — replace broken fl#add_kit_ee.tpa",
+    "description": "Replaces broken fl#add_kit_ee.tpa (invalid backslash at line 338) with a working version from Amber mod.",
+    "target_mod": "Bristlelick",
+    "trigger": { "type": "file_exists", "path": "Bristlelick/lib/fl#add_kit_ee.tpa" },
+    "marker": { "file": "Bristlelick/lib/fl#add_kit_ee.tpa", "text": "fl#add_kit_ee" },
+    "ops": [
+      { "type": "copy", "src": "bristlelick/fl#add_kit_ee.tpa", "dest": "Bristlelick/lib/fl#add_kit_ee.tpa" }
+    ]
+  },
+  {
+    "id": 48,
+    "name": "walahnan — replace broken fl#add_kit_ee.tpa",
+    "description": "Same fix as bristlelick #47 for walahnan's copy of the library.",
+    "target_mod": "Walahnan",
+    "trigger": { "type": "file_exists", "path": "Walahnan/libraries/fl#add_kit_ee.tpa" },
+    "marker": { "file": "Walahnan/libraries/fl#add_kit_ee.tpa", "text": "fl#add_kit_ee" },
+    "ops": [
+      { "type": "copy", "src": "walahnan/fl#add_kit_ee.tpa", "dest": "Walahnan/libraries/fl#add_kit_ee.tpa" }
+    ]
+  },
+  {
+    "id": 49,
+    "name": "c#anotherfinehell — restore c#afhvis.baf (MOVE'd by prior install)",
+    "description": "TP2 line 148 COMPILEs c#afhvis.baf, then line 152 MOVEs it to c#afhvi1.baf. A prior install executed the MOVE, leaving the source permanently renamed. Restore c#afhvis.baf from the surviving c#afhvi1.baf before install.",
+    "target_mod": "c#anotherfinehell",
+    "trigger": { "type": "file_exists", "path": "c#anotherfinehell/c#anotherfinehell.tp2" },
+    "marker": { "file": "c#anotherfinehell/scripts/c#afhvis.baf", "text": "" },
+    "ops": [
+      { "type": "copy_if_missing", "src": "c#anotherfinehell/scripts/c#afhvi1.baf", "dest": "c#anotherfinehell/scripts/c#afhvis.baf" }
+    ]
   }
 ]

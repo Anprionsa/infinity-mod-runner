@@ -45,11 +45,19 @@ body {
 .tab-bar {
   display: flex;
   justify-content: center;
+  align-items: center;
   background: var(--bgs);
   border-bottom: 1px solid var(--brd);
   padding: 0 12px;
   gap: 2px;
   flex-shrink: 0;
+  position: relative;
+}
+.tab-bar-lang {
+  position: absolute;
+  right: 12px;
+  top: 50%;
+  transform: translateY(-50%);
 }
 .tab-bar button {
   padding: 10px 20px;

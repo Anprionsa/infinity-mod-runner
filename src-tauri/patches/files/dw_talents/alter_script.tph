@@ -490,9 +490,19 @@ COPY_EXISTING "%script%.bcs" "override"
           SET length=(end - start) + 6
           READ_ASCII start data (length)
           DELETE_BYTES start length
+          SET decompile_failed=0
           INNER_PATCH_SAVE data "SC%LNL%%data%SC%LNL%" BEGIN
-             DECOMPILE_BCS_TO_BAF
+             PATCH_TRY
+               DECOMPILE_BCS_TO_BAF
+             WITH DEFAULT
+               // FIX: Catch BCS-to-BAF decompile failures (e.g. large Turnabout mod
+               // scripts d0t#alia.bcs/d0t#dyna.bcs that can't survive round-trip).
+               // Without this, the unhandled exception aborts the entire component.
+               PATCH_PRINT "WARNING: [%SOURCE_FILE%] block decompile failed — skipping this script block."
+               SET decompile_failed=1
+             END
              SET proceed=0
+             PATCH_IF decompile_failed=0 BEGIN // only process if decompile succeeded
              PATCH_IF (!found_match || !only_once) BEGIN
               PATCH_IF "%match_function%" STRING_COMPARE "" BEGIN
                 READ_ASCII 0x0 data_temp (BUFFER_LENGTH)  // we do this to avoid side-effects
@@ -594,6 +604,7 @@ COPY_EXISTING "%script%.bcs" "override"
                     PATCH_FAIL "internal error in ALTER_SCRIPT suite"
                  END
              END
+             END // decompile_failed=0 guard
           END
           SPRINT new_script "%new_script%%data%"
           SET start=INDEX_BUFFER("CR")

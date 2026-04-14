@@ -1,0 +1,33 @@
+{
+  "force_small_batch_mods": ["mih_eq", "mih_ip", "mih_tweaks", "trap_overhaul", "dw_talents", "stratagems"],
+  "force_small_batch_size": 3,
+  "essential_mods": ["dlcmerger", "eefixpack", "eet", "eet_end"],
+  "watched_files": ["ACTION.IDS", "TRIGGER.IDS", "AREATYPE.IDS", "BD0120.BCS"],
+  "eet_auto_fill_trigger": "Enter the full path to your BG:EE+SoD installation",
+  "post_copy_delay_ms": 0,
+  "ocamlrunparam": "s=16M,o=500,O=1000000",
+  "pe_stack_reserve_mb": 32,
+  "readln_defaults": {
+    "_comment": "Auto-answer READLN prompts per mod. Each entry is a list of responses sent in order.",
+    "yvette":                ["1"],
+    "vienxay":               ["1", "1"],
+    "kale":                  ["1"],
+    "aranw":                 ["3"],
+    "navarra":               ["1"],
+    "acbre":                 ["1", "1"],
+    "tobaurora":             ["1"],
+    "bgeespawn":             ["1", "1", "1"],
+    "a7-banteraccelerator":  ["300", "100", "Y"],
+    "lightingpack":          ["1.0", "0.0", "1.0", "Y"],
+    "iiitemmod":             ["1"],
+    "msfm":                  ["Gorion's Ward"],
+    "eet_tweaks":            ["8000000", "161000"]
+  },
+  "readln_fallback": "1",
+  "readln_timeout_secs": 30,
+  "sibling_directories": {
+    "_comment": "When mod X is junctioned, also junction sibling directory Y from the same parent. Key = mod folder name (lowercase), Value = list of sibling folder names.",
+    "tddz": ["TDD"],
+    "mercenaries": ["mercy_of_bhaal", "slaves_of_bhaal"]
+  }
+}

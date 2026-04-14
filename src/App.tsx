@@ -1,13 +1,13 @@
 import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { guiLog, installGlobalErrorHandlers } from "./lib/gui-logger";
+import { I18nProvider, LanguageSelector, useI18n } from "./lib/i18n";
 import { validateGameDir, checkGameFreshness, scanModDirectory, getBinaryVersion, readFileContents, type GameFreshness, type ModDirScan } from "./lib/tauri-bridge";
 import { buildParsedLog } from "./lib/log-parser";
 import SetupWizard from "./components/SetupWizard";
-import ImportPanel from "./components/ImportPanel";
-import PreFlight from "./components/PreFlight";
+import ModsPanel from "./components/ModsPanel";
+import ReadyCheck from "./components/ReadyCheck";
 import InstallRunner from "./components/InstallRunner";
-import DownloadPanel from "./components/DownloadPanel";
 import DebugPanel from "./components/DebugPanel";
 
 export interface AppConfig {
@@ -27,6 +27,9 @@ export interface AppConfig {
   download_mods: boolean;
   abort_on_warnings: boolean;
   never_abort: boolean;
+  bcs_scanner: boolean;
+  auto_skip_after_retry: boolean;
+  suppress_readmes: boolean;
   // Install options — advanced
   language: string;
   depth: number;
@@ -39,6 +42,9 @@ export interface AppConfig {
   casefold: boolean;
   generic_weidu_args: string;
   telemetry_opt_in: boolean | null;
+  backup_directory: string | null;
+  data_directory: string | null;
+  ui_language: string | null;
 }
 
 export interface ParsedLog {
@@ -50,6 +56,8 @@ export interface ParsedLog {
   bgeeRaw: string | null;
   eetLogPath: string | null;
   bgeeLogPath: string | null;
+  /** If loaded from a preset/community build, tracks the source */
+  presetSource?: { name: string; type: "preset" | "build"; componentCount: number } | null;
 }
 
 export interface LogEntry {
@@ -62,10 +70,17 @@ export interface LogEntry {
   version: string;
 }
 
+/** Per-component install status — key is "mod_name:component" */
+export type InstallStatusMap = Map<string, "success" | "warning" | "error" | "skipped">;
+
 export interface PreFlightResult {
-  messages: { t: "err" | "warn" | "info" | "ok"; m: string }[];
+  messages: { t: "err" | "warn" | "info" | "ok" | "action"; m: string; actionId?: string }[];
   passed: boolean;
   checkedAt: number;
+  patchesAvailable: number;
+  patchesApplied: boolean;
+  backupExists: boolean;
+  backupName?: string;
 }
 
 /** Summary of download readiness — reported by DownloadPanel, consumed by PreFlight */
@@ -76,18 +91,26 @@ export interface DownloadReadiness {
   builtAt: number;         // timestamp when plan was built
 }
 
-type Tab = "setup" | "import" | "download" | "preflight" | "install" | "debug";
+/** Key for excluding a component: "mod_name:component_number" */
+export type ExcludeKey = string;
 
-const TABS: { id: Tab; label: string }[] = [
-  { id: "setup", label: "Setup" },
-  { id: "import", label: "Import" },
-  { id: "download", label: "Download" },
-  { id: "preflight", label: "Pre-Flight" },
-  { id: "install", label: "Install" },
-  { id: "debug", label: "Debug" },
+export interface PausePoint {
+  afterModIndex: number;  // index in the entries array after which to pause
+  message: string;        // user-defined message shown at pause
+  phase: "bgee" | "eet";
+}
+
+type Tab = "setup" | "mods" | "preflight" | "install" | "debug";
+
+const TABS: { id: Tab; label: string; tKey: string }[] = [
+  { id: "setup", label: "Setup", tKey: "tab.setup" },
+  { id: "mods", label: "Mods", tKey: "tab.mods" },
+  { id: "preflight", label: "Ready Check", tKey: "tab.ready_check" },
+  { id: "install", label: "Install", tKey: "tab.install" },
+  { id: "debug", label: "Debug", tKey: "tab.debug" },
 ];
 
-const DEFAULT_FORGE_URL = "https://anprionsa.github.io/eet-mod-forge";
+export const DEFAULT_FORGE_URL = "https://anprionsa.github.io/eet-mod-forge";
 
 const defaultConfig: AppConfig = {
   bg2_game_dir: null,
@@ -104,6 +127,9 @@ const defaultConfig: AppConfig = {
   download_mods: false,
   abort_on_warnings: false,
   never_abort: false,
+  bcs_scanner: false,
+  auto_skip_after_retry: false,
+  suppress_readmes: true,
   language: "en_US",
   depth: 5,
   strict_matching: false,
@@ -115,7 +141,37 @@ const defaultConfig: AppConfig = {
   casefold: false,
   generic_weidu_args: "",
   telemetry_opt_in: null,
+  backup_directory: null,
+  data_directory: null,
+  ui_language: null,
 };
+
+function TabBar({ tab, setTab, canInstall, installRunning }: { tab: Tab; setTab: (t: Tab) => void; canInstall: boolean; installRunning: boolean }) {
+  const { t } = useI18n();
+  return (
+    <div className="tab-bar">
+      {TABS.map(({ id, label, tKey }) => (
+        <button
+          key={id}
+          className={[
+            tab === id ? "active" : "",
+            id === "install" && !canInstall && !installRunning ? "disabled" : "",
+          ].filter(Boolean).join(" ")}
+          onClick={() => {
+            if (id === "install" && !canInstall && !installRunning) return;
+            if (id !== tab) guiLog.debug("UI", `Tab: ${t(tKey, label)}`);
+            setTab(id);
+          }}
+        >
+          {t(tKey, label)}
+        </button>
+      ))}
+      <div className="tab-bar-lang">
+        <LanguageSelector />
+      </div>
+    </div>
+  );
+}
 
 export default function App() {
   const [tab, setTab] = useState<Tab>("setup");
@@ -126,10 +182,18 @@ export default function App() {
   const [installRunning, setInstallRunning] = useState(false);
   const [forgeOnline, setForgeOnline] = useState<boolean | null>(null);
   const [downloadReadiness, setDownloadReadiness] = useState<DownloadReadiness | null>(null);
+  const [excludedComponents, setExcludedComponents] = useState<Set<ExcludeKey>>(new Set());
+  const [pausePoints, setPausePoints] = useState<PausePoint[]>([]);
+  const [installStatus, setInstallStatus] = useState<InstallStatusMap>(new Map());
 
   // Splash screen state
   const [splashDone, setSplashDone] = useState(false);
   const [splashStep, setSplashStep] = useState("Starting...");
+
+  // Auto-update state
+  const [updateAvailable, setUpdateAvailable] = useState<{ version: string; body: string; update: unknown } | null>(null);
+  const [updateProgress, setUpdateProgress] = useState<number | null>(null);
+  const [updateSkipped, setUpdateSkipped] = useState(false);
 
   // Pre-loaded setup data (populated during splash)
   const [preloadedSetup, setPreloadedSetup] = useState<{
@@ -148,7 +212,8 @@ export default function App() {
 
   // Unified init sequence — runs all startup tasks and tracks progress
   useEffect(() => {
-    guiLog.info("APP", "EET Mod Runner v0.8.0 launched");
+    guiLog.info("APP", "────────────────────────────────────────");
+    guiLog.info("APP", "EET Mod Runner v0.9.0-beta launched");
     installGlobalErrorHandlers();
 
     async function init() {
@@ -165,7 +230,32 @@ export default function App() {
       }
       setConfig(cfg);
       setConfigLoaded(true);
-      await new Promise((r) => setTimeout(r, 1500));
+      await new Promise((r) => setTimeout(r, 500));
+
+      // Step 1b: Check for updates
+      setSplashStep("Checking for updates...");
+      await new Promise((r) => setTimeout(r, 50));
+      try {
+        const { check } = await import("@tauri-apps/plugin-updater");
+        const update = await check();
+        if (update) {
+          guiLog.info("APP", `Update available: ${update.version}`);
+          setUpdateAvailable({ version: update.version, body: update.body || "", update });
+          // Splash will pause here — user clicks Update or Skip
+          // Wait until user makes a choice (updateSkipped becomes true or app restarts)
+          await new Promise<void>((resolve) => {
+            const interval = setInterval(() => {
+              // Check if user skipped (we set a flag on the window for cross-scope access)
+              if ((window as unknown as Record<string, boolean>).__eetmr_update_skipped) {
+                clearInterval(interval);
+                resolve();
+              }
+            }, 100);
+          });
+        }
+      } catch {
+        // Updater not configured, offline, or error — continue silently
+      }
 
       // Step 2: Check forge connectivity
       setSplashStep("Connecting to Forge...");
@@ -174,8 +264,10 @@ export default function App() {
       try {
         const r = await fetch(`${url}/data/known_issues.json`, { method: "HEAD" });
         setForgeOnline(r.ok);
+        guiLog.info("APP", `Forge: ${r.ok ? "connected" : "unreachable"} (${url})`);
       } catch {
         setForgeOnline(false);
+        guiLog.info("APP", `Forge: offline (${url})`);
       }
 
       // Step 3: Pre-load setup data so the UI is ready immediately
@@ -281,6 +373,10 @@ export default function App() {
   const canInstall = setupValid && !!parsedLog && preFlight?.passed !== false;
 
   return (
+    <I18nProvider
+      lang={config.ui_language || "en"}
+      onLangChange={(lang) => saveConfig({ ...config, ui_language: lang })}
+    >
     <>
     {/* Splash overlay — covers everything until init completes.
         The main app renders underneath (hidden) so all components mount
@@ -301,44 +397,100 @@ export default function App() {
         <div style={{ color: "var(--goldb)", fontSize: 24, fontWeight: 700, letterSpacing: "0.5px" }}>
           EET Mod Runner
         </div>
-        <div style={{ color: "var(--txd)", fontSize: 13, marginTop: 4 }}>
-          {splashStep}
-        </div>
-        <div className="progress-bar" style={{ width: 240, height: 4, marginTop: 12 }}>
-          <div className="fill" style={{
-            width: splashStep === "Ready" ? "100%" : splashStep.includes("logs") ? "90%" : splashStep.includes("game") ? "70%" : splashStep.includes("Forge") ? "45%" : "20%",
-            transition: "width 0.3s ease",
-          }} />
-        </div>
+        {/* Update available — pause splash and show update UI */}
+        {updateAvailable && !updateSkipped ? (
+          <>
+            <div style={{
+              textAlign: "center", padding: "12px 24px", borderRadius: 8,
+              background: "linear-gradient(90deg, transparent, rgba(40,220,100,0.08), transparent)",
+              borderTop: "1px solid rgba(40,220,100,0.2)", borderBottom: "1px solid rgba(40,220,100,0.2)",
+              maxWidth: 360,
+            }}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: "var(--grn)", textTransform: "uppercase", letterSpacing: 1, marginBottom: 6 }}>
+                Update Available
+              </div>
+              <div style={{ fontSize: 14, color: "var(--tx)", marginBottom: 4 }}>
+                v0.9.0-beta {"\u2192"} v{updateAvailable.version}
+              </div>
+              {updateAvailable.body && (
+                <div style={{ fontSize: 11, color: "var(--txd)", lineHeight: 1.4, maxHeight: 60, overflow: "hidden", marginBottom: 8 }}>
+                  {updateAvailable.body.slice(0, 200)}
+                </div>
+              )}
+              {updateProgress !== null ? (
+                <div style={{ marginTop: 8 }}>
+                  <div style={{ fontSize: 11, color: "var(--txd)", marginBottom: 4 }}>
+                    Downloading update... {updateProgress}%
+                  </div>
+                  <div className="progress-bar" style={{ width: 240, height: 4 }}>
+                    <div className="fill" style={{ width: `${updateProgress}%`, transition: "width 0.3s ease" }} />
+                  </div>
+                </div>
+              ) : (
+                <div style={{ display: "flex", gap: 10, justifyContent: "center", marginTop: 8 }}>
+                  <button className="btn btn-primary" style={{ fontSize: 12, padding: "6px 16px" }}
+                    onClick={async () => {
+                      try {
+                        const upd = updateAvailable.update as { downloadAndInstall: (cb: (e: { event: string; data: { contentLength?: number; chunkLength?: number } }) => void) => Promise<void> };
+                        let downloaded = 0;
+                        let total = 0;
+                        await upd.downloadAndInstall((event) => {
+                          if (event.event === "Started" && event.data.contentLength) {
+                            total = event.data.contentLength;
+                          } else if (event.event === "Progress" && event.data.chunkLength) {
+                            downloaded += event.data.chunkLength;
+                            if (total > 0) setUpdateProgress(Math.round((downloaded / total) * 100));
+                          } else if (event.event === "Finished") {
+                            setUpdateProgress(100);
+                          }
+                        });
+                        // Restart after install
+                        const { relaunch } = await import("@tauri-apps/plugin-process");
+                        await relaunch();
+                      } catch (e) {
+                        guiLog.error("APP", `Update failed: ${e}`);
+                        setUpdateAvailable(null);
+                      }
+                    }}>
+                    Update Now
+                  </button>
+                  <button className="btn" style={{ fontSize: 12, padding: "6px 16px" }}
+                    onClick={() => {
+                      setUpdateSkipped(true);
+                      (window as unknown as Record<string, boolean>).__eetmr_update_skipped = true;
+                    }}>
+                    Skip
+                  </button>
+                </div>
+              )}
+            </div>
+          </>
+        ) : (
+          <>
+            <div style={{ color: "var(--txd)", fontSize: 13, marginTop: 4 }}>
+              {splashStep}
+            </div>
+            <div className="progress-bar" style={{ width: 240, height: 4, marginTop: 12 }}>
+              <div className="fill" style={{
+                width: splashStep === "Ready" ? "100%"
+                  : splashStep.includes("logs") ? "90%"
+                  : splashStep.includes("game") ? "70%"
+                  : splashStep.includes("Forge") ? "45%"
+                  : splashStep.includes("update") ? "30%"
+                  : "20%",
+                transition: "width 0.3s ease",
+              }} />
+            </div>
+          </>
+        )}
         <div style={{ color: "var(--txd)", fontSize: 10, marginTop: 16, opacity: 0.5 }}>
-          v0.8.0
+          v0.9.0-beta
         </div>
       </div>
     )}
     {/* Main app — renders underneath splash so DOM is pre-built */}
     <div style={{ visibility: splashDone ? "visible" : "hidden", height: "100vh", display: "flex", flexDirection: "column" as const }}>
-      <div className="tab-bar">
-        {TABS.map(({ id, label }) => (
-          <button
-            key={id}
-            className={[
-              tab === id ? "active" : "",
-              id === "install" && !canInstall && !installRunning
-                ? "disabled"
-                : "",
-            ]
-              .filter(Boolean)
-              .join(" ")}
-            onClick={() => {
-              if (id === "install" && !canInstall && !installRunning) return;
-              guiLog.debug("UI", `Tab switch: ${id}`);
-              setTab(id);
-            }}
-          >
-            {label}
-          </button>
-        ))}
-      </div>
+      <TabBar tab={tab} setTab={setTab} canInstall={canInstall} installRunning={installRunning} />
 
       <div className="panel">
         {tab === "setup" && (
@@ -347,29 +499,36 @@ export default function App() {
             onSave={saveConfig}
             configLoaded={configLoaded}
             preloaded={preloadedSetup}
+            installRunning={installRunning}
           />
         )}
-        {/* ImportPanel stays mounted so mod list doesn't re-render on tab switch */}
-        <div style={{ display: tab === "import" ? "block" : "none", height: "100%" }}>
-          <ImportPanel
+        {/* ModsPanel — combines Import, Order, and Download */}
+        <div style={{ display: tab === "mods" ? "block" : "none", height: "100%" }}>
+          <ModsPanel
             config={config}
             parsedLog={parsedLog}
             onImport={setParsedLog}
             onSaveConfig={saveConfig}
+            excludedComponents={excludedComponents}
+            onExcludedChange={setExcludedComponents}
+            pausePoints={pausePoints}
+            onPausePointsChange={setPausePoints}
+            forgeOnline={forgeOnline}
+            onReadinessChange={setDownloadReadiness}
+            installRunning={installRunning}
+            installStatus={installStatus}
           />
         </div>
-        {/* DownloadPanel stays mounted */}
-        <div style={{ display: tab === "download" ? "block" : "none", height: "100%" }}>
-          <DownloadPanel config={config} parsedLog={parsedLog} forgeOnline={forgeOnline} onReadinessChange={setDownloadReadiness} />
-        </div>
         {tab === "preflight" && (
-          <PreFlight
+          <ReadyCheck
             config={config}
+            onSaveConfig={saveConfig}
             parsedLog={parsedLog}
             result={preFlight}
             onResult={setPreFlight}
             forgeOnline={forgeOnline}
             downloadReadiness={downloadReadiness}
+            installRunning={installRunning}
           />
         )}
         {/* InstallRunner stays mounted (hidden) so state survives tab switches */}
@@ -381,11 +540,15 @@ export default function App() {
             onRunningChange={setInstallRunning}
             onSaveConfig={saveConfig}
             weiduVersion={preloadedSetup.weiduVersion}
+            excludedComponents={excludedComponents}
+            pausePoints={pausePoints.map((p) => ({ afterModIndex: p.afterModIndex, message: p.message, phase: p.phase }))}
+            backupExists={preFlight?.backupExists ?? false}
+            onInstallStatus={setInstallStatus}
           />
         </div>
         {/* DebugPanel stays mounted so parsed results survive tab switches */}
         <div style={{ display: tab === "debug" ? "block" : "none", height: "100%" }}>
-          <DebugPanel config={config} forgeOnline={forgeOnline} parsedLog={parsedLog} />
+          <DebugPanel config={config} forgeOnline={forgeOnline} parsedLog={parsedLog} installRunning={installRunning} />
         </div>
       </div>
 
@@ -406,9 +569,29 @@ export default function App() {
             ? `${parsedLog.modCount} mods / ${parsedLog.componentCount} components loaded`
             : "No log imported"}
         </div>
-        <div className="status-item">EET Mod Runner v0.8.0</div>
+        {updateAvailable && updateSkipped && !installRunning && (
+          <button
+            className="status-item"
+            style={{ cursor: "pointer", color: "var(--grn)", border: "none", background: "none", fontSize: 11, padding: 0 }}
+            onClick={async () => {
+              try {
+                const upd = updateAvailable.update as { downloadAndInstall: (cb: (e: { event: string; data: { contentLength?: number; chunkLength?: number } }) => void) => Promise<void> };
+                await upd.downloadAndInstall(() => {});
+                const { relaunch } = await import("@tauri-apps/plugin-process");
+                await relaunch();
+              } catch (e) {
+                guiLog.error("APP", `Update failed: ${e}`);
+              }
+            }}
+            title={`Update to v${updateAvailable.version}`}
+          >
+            {"\uD83D\uDD04"} Update v{updateAvailable.version}
+          </button>
+        )}
+        <div className="status-item">EET Mod Runner v0.9.0-beta</div>
       </div>
     </div>
     </>
+    </I18nProvider>
   );
 }

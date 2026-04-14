@@ -1,6 +1,5 @@
 use crate::config::AppConfig;
 use std::path::Path;
-use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager};
 
 /// Load persisted config from disk.
@@ -78,18 +77,6 @@ pub fn detect_weidu() -> Result<Option<String>, String> {
         if Path::new(p).exists() {
             return Ok(Some(p.to_string()));
         }
-    }
-    Ok(None)
-}
-
-/// Search PATH for mod_installer.
-#[tauri::command]
-pub fn detect_mod_installer() -> Result<Option<String>, String> {
-    if let Ok(path) = which("mod_installer") {
-        return Ok(Some(path));
-    }
-    if let Ok(path) = which("mod_installer.exe") {
-        return Ok(Some(path));
     }
     Ok(None)
 }
@@ -420,391 +407,7 @@ fn find_file_recursive(dir: &Path, filename: &str, max_depth: usize) -> bool {
     false
 }
 
-/// Read install_status.json from the game directory (written by mod_installer).
-/// Uses read() instead of read_to_string() for more reliable access on Windows
-/// when mod_installer may have the file open for writing.
-#[tauri::command]
-pub async fn read_install_status(game_dir: String) -> Result<Option<InstallStatus>, String> {
-  tauri::async_runtime::spawn_blocking(move || {
-    let status_path = Path::new(&game_dir).join("install_status.json");
-    if !status_path.exists() {
-        return Ok(None);
-    }
-
-    // On Windows, use explicit share mode to read files that mod_installer may have open.
-    // std::fs::read can return cached/stale data if the file is being written to by another process.
-    #[cfg(target_os = "windows")]
-    let bytes = {
-        use std::os::windows::fs::OpenOptionsExt;
-        const FILE_SHARE_READ: u32 = 0x00000001;
-        const FILE_SHARE_WRITE: u32 = 0x00000002;
-        const FILE_SHARE_DELETE: u32 = 0x00000004;
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
-            .open(&status_path);
-        match file {
-            Ok(mut f) => {
-                use std::io::Read;
-                let mut buf = Vec::new();
-                match f.read_to_end(&mut buf) {
-                    Ok(_) => buf,
-                    Err(e) => return Err(format!("status read error: {e}")),
-                }
-            }
-            Err(e) => return Err(format!("status open error: {e}")),
-        }
-    };
-
-    #[cfg(not(target_os = "windows"))]
-    let bytes = match std::fs::read(&status_path) {
-        Ok(b) => b,
-        Err(e) => return Err(format!("status read error: {e}")),
-    };
-
-    let contents = String::from_utf8_lossy(&bytes);
-    let trimmed = contents.trim().trim_end_matches('\0');
-    if trimmed.is_empty() {
-        return Ok(None);
-    }
-    match serde_json::from_str::<InstallStatus>(trimmed) {
-        Ok(status) => Ok(Some(status)),
-        Err(_) => {
-            // Partially written — retry next poll
-            Ok(None)
-        }
-    }
-  }).await.map_err(|e| e.to_string())?
-}
-
-#[derive(serde::Serialize, serde::Deserialize)]
-pub struct InstallStatus {
-    pub current: usize,
-    pub total: usize,
-    #[serde(rename = "mod")]
-    pub mod_name: String,
-    pub component: String,
-    pub status: String,
-    pub errors: usize,
-    pub warnings: usize,
-    pub skipped: usize,
-    pub last_updated: String,
-}
-
-/// Read new lines from install_errors.log, starting after `after_line`.
-#[tauri::command]
-pub async fn read_error_log(game_dir: String, after_line: usize) -> Result<ErrorLogResult, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let log_path = Path::new(&game_dir).join("install_errors.log");
-        if !log_path.exists() {
-            return Ok(ErrorLogResult {
-                entries: Vec::new(),
-                total_lines: 0,
-            });
-        }
-        let contents = std::fs::read_to_string(&log_path)
-            .map_err(|e| format!("Failed to read install_errors.log: {e}"))?;
-
-        let all_lines: Vec<&str> = contents.lines().collect();
-        let total_lines = all_lines.len();
-
-        let entries: Vec<ErrorLogEntry> = all_lines
-            .into_iter()
-            .skip(after_line)
-            .filter(|line| !line.trim().is_empty())
-            .filter_map(|line| parse_error_line(line))
-            .collect();
-
-        Ok(ErrorLogResult {
-            entries,
-            total_lines,
-        })
-    }).await.map_err(|e| e.to_string())?
-}
-
-#[derive(serde::Serialize)]
-pub struct ErrorLogResult {
-    pub entries: Vec<ErrorLogEntry>,
-    pub total_lines: usize,
-}
-
-#[derive(serde::Serialize)]
-pub struct ErrorLogEntry {
-    pub timestamp: String,
-    pub level: String,
-    pub mod_name: String,
-    pub message: String,
-}
-
-/// Parse a single line from install_errors.log.
-/// Format: "2026-04-02T12:42:15Z ERROR dw_talents#60100 "message" — details"
-fn parse_error_line(line: &str) -> Option<ErrorLogEntry> {
-    let line = line.trim();
-    if line.is_empty() || line.starts_with('#') {
-        return None;
-    }
-
-    // Try to parse structured format: TIMESTAMP LEVEL MOD_INFO MESSAGE
-    // Timestamp is ISO format up to first space
-    let mut parts = line.splitn(3, ' ');
-    let timestamp = parts.next().unwrap_or("").to_string();
-    let level = parts.next().unwrap_or("").to_string();
-    let rest = parts.next().unwrap_or("").to_string();
-
-    // Extract mod name from rest (everything before the first quote or dash)
-    let (mod_name, message) = if let Some(quote_pos) = rest.find('"') {
-        let mn = rest[..quote_pos].trim().to_string();
-        let msg = rest[quote_pos..].to_string();
-        (mn, msg)
-    } else if let Some(dash_pos) = rest.find(" — ") {
-        let mn = rest[..dash_pos].trim().to_string();
-        let msg = rest[dash_pos + 5..].to_string();
-        (mn, msg)
-    } else {
-        (String::new(), rest)
-    };
-
-    // Validate level is one we expect
-    let normalized_level = match level.to_uppercase().as_str() {
-        "ERROR" | "WARN" | "SKIP" | "RETRY" => level.to_uppercase(),
-        _ => return Some(ErrorLogEntry {
-            timestamp: String::new(),
-            level: "INFO".to_string(),
-            mod_name: String::new(),
-            message: line.to_string(),
-        }),
-    };
-
-    Some(ErrorLogEntry {
-        timestamp,
-        level: normalized_level,
-        mod_name,
-        message,
-    })
-}
-
-/// PID of the running install process (for abort). No Mutex around Child.
-static INSTALL_PID: Mutex<Option<u32>> = Mutex::new(None);
-/// Stdin handle — separate so we can write without blocking on wait.
-static INSTALL_STDIN: Mutex<Option<std::process::ChildStdin>> = Mutex::new(None);
-
-/// Start mod_installer as a subprocess, streaming output via Tauri events.
-#[tauri::command]
-pub async fn start_install(
-    app: AppHandle,
-    mod_installer_path: String,
-    args: Vec<String>,
-) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || {
-    use std::io::{BufRead, BufReader};
-    use std::process::{Command, Stdio};
-
-    let mut cmd = Command::new(&mod_installer_path);
-    cmd.args(&args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .stdin(Stdio::piped());
-
-    // Prevent a blank CMD window from appearing on Windows
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
-
-    let mut child = cmd.spawn().map_err(|e| format!("Failed to start mod_installer: {e}"))?;
-
-    let pid = child.id();
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
-    let stdin = child.stdin.take();
-
-    // Store PID and stdin separately — no Mutex around Child itself
-    {
-        let mut lock = INSTALL_PID.lock().map_err(|e| e.to_string())?;
-        *lock = Some(pid);
-    }
-    {
-        let mut lock = INSTALL_STDIN.lock().map_err(|e| e.to_string())?;
-        *lock = stdin;
-    }
-
-    let app_out = app.clone();
-    let app_err = app.clone();
-    let app_exit = app.clone();
-
-    // Stream stdout
-    if let Some(out) = stdout {
-        std::thread::spawn(move || {
-            let reader = BufReader::new(out);
-            for line in reader.lines() {
-                if let Ok(line) = line {
-                    let _ = app_out.emit("install-stdout", &line);
-                }
-            }
-        });
-    }
-
-    // Stream stderr
-    if let Some(err) = stderr {
-        std::thread::spawn(move || {
-            let reader = BufReader::new(err);
-            for line in reader.lines() {
-                if let Ok(line) = line {
-                    let _ = app_err.emit("install-stderr", &line);
-                }
-            }
-        });
-    }
-
-    // Wait for exit in a thread — owns the Child, no Mutex needed
-    std::thread::spawn(move || {
-        let exit_code = match child.wait() {
-            Ok(status) => status.code().unwrap_or(-1),
-            Err(_) => -1,
-        };
-        // Clear PID and stdin (use .ok() to avoid panic on poisoned mutex)
-        if let Ok(mut lock) = INSTALL_PID.lock() {
-            *lock = None;
-        }
-        if let Ok(mut lock) = INSTALL_STDIN.lock() {
-            *lock = None;
-        }
-        let _ = app_exit.emit("install-exit", exit_code);
-    });
-
-    Ok(())
-    }).await.map_err(|e| e.to_string())?
-}
-
-/// Send input to the running mod_installer process stdin.
-#[tauri::command]
-pub fn send_install_input(text: String) -> Result<(), String> {
-    use std::io::Write;
-    let mut lock = INSTALL_STDIN.lock().map_err(|e| e.to_string())?;
-    if let Some(ref mut stdin) = *lock {
-        stdin.write_all(text.as_bytes()).map_err(|e| format!("stdin write failed: {e}"))?;
-        stdin.write_all(b"\n").map_err(|e| format!("stdin write failed: {e}"))?;
-        stdin.flush().map_err(|e| format!("stdin flush failed: {e}"))?;
-        return Ok(());
-    }
-    Err("No running install process".to_string())
-}
-
-/// Gracefully stop the running install. Sends Ctrl+C (CTRL_BREAK_EVENT on Windows,
-/// SIGINT on Unix) first, waits 10 seconds, then force-kills if still alive.
-#[tauri::command]
-pub fn abort_install() -> Result<(), String> {
-    let pid = {
-        let lock = INSTALL_PID.lock().map_err(|e| e.to_string())?;
-        *lock
-    };
-
-    if let Some(pid) = pid {
-        #[cfg(target_os = "windows")]
-        {
-            use std::os::windows::process::CommandExt;
-            std::thread::spawn(move || {
-                // First try graceful: send CTRL_BREAK_EVENT to the process
-                // This lets WeiDU finish its current operation and clean up
-                unsafe {
-                    // GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT=1, processGroupId=pid)
-                    #[link(name = "kernel32")]
-                    unsafe extern "system" {
-                        fn GenerateConsoleCtrlEvent(event: u32, group_id: u32) -> i32;
-                    }
-                    GenerateConsoleCtrlEvent(1, pid);
-                }
-
-                // Wait up to 10 seconds for graceful exit
-                std::thread::sleep(std::time::Duration::from_secs(10));
-
-                // Check if still alive by trying taskkill without /F first
-                let check = std::process::Command::new("taskkill")
-                    .args(["/PID", &pid.to_string(), "/T", "/F"])
-                    .creation_flags(0x08000000)
-                    .output();
-                if let Ok(output) = check {
-                    if !output.status.success() {
-                        // Already dead — good
-                    }
-                }
-            });
-        }
-        #[cfg(not(target_os = "windows"))]
-        {
-            if pid > 0 {
-                std::thread::spawn(move || {
-                    // Graceful: SIGINT (Ctrl+C equivalent)
-                    unsafe {
-                        libc::kill(pid as i32, libc::SIGINT);
-                    }
-                    // Wait 10 seconds
-                    std::thread::sleep(std::time::Duration::from_secs(10));
-                    // Force kill if still alive
-                    unsafe {
-                        libc::kill(pid as i32, libc::SIGKILL);
-                    }
-                });
-            }
-        }
-    }
-    Ok(())
-}
-
-// ─── Pause / Resume ───
-
-/// Request a pause by creating a `pause_requested` file in the game directory.
-/// mod_installer checks for this file between mods and pauses if found.
-#[tauri::command]
-pub fn request_pause(game_dir: String) -> Result<(), String> {
-    let pause_file = Path::new(&game_dir).join("pause_requested");
-    std::fs::write(&pause_file, "paused by EET Mod Runner")
-        .map_err(|e| format!("Failed to create pause file: {e}"))?;
-    Ok(())
-}
-
-/// Resume by deleting the `pause_requested` file.
-#[tauri::command]
-pub fn request_resume(game_dir: String) -> Result<(), String> {
-    let pause_file = Path::new(&game_dir).join("pause_requested");
-    if pause_file.exists() {
-        std::fs::remove_file(&pause_file)
-            .map_err(|e| format!("Failed to remove pause file: {e}"))?;
-    }
-    Ok(())
-}
-
-/// Check if a pause is currently requested or active.
-#[tauri::command]
-pub fn check_pause_state(game_dir: String) -> Result<PauseState, String> {
-    let pause_file = Path::new(&game_dir).join("pause_requested");
-    let pause_requested = pause_file.exists();
-
-    // Check install_status.json for "paused" status (mod_installer confirms the pause)
-    let status_path = Path::new(&game_dir).join("install_status.json");
-    let is_paused = if status_path.exists() {
-        std::fs::read_to_string(&status_path)
-            .ok()
-            .and_then(|s| serde_json::from_str::<InstallStatus>(&s).ok())
-            .map(|s| s.status == "paused")
-            .unwrap_or(false)
-    } else {
-        false
-    };
-
-    Ok(PauseState {
-        pause_requested,
-        is_paused,
-    })
-}
-
-#[derive(serde::Serialize)]
-pub struct PauseState {
-    pub pause_requested: bool,
-    pub is_paused: bool,
-}
+// ─── Old mod_installer commands removed — native installer replaces them ───
 
 /// Batch check which mods exist on disk. Much faster than individual calls.
 /// Returns a map of tp2_path → exists (true/false).
@@ -840,7 +443,16 @@ pub async fn batch_check_mods_exist(
         for tp2_path in &tp2_paths {
             let normalized = tp2_path.replace('\\', "/");
             let tp2_filename = normalized.split('/').last().unwrap_or(tp2_path).to_lowercase();
-            result.insert(tp2_path.clone(), found_tp2s.contains(&tp2_filename));
+            // WeiDU logs may reference "klatu.tp2" but the file on disk is "setup-klatu.tp2"
+            // (or vice versa). Check both variants.
+            let found = found_tp2s.contains(&tp2_filename) || {
+                if let Some(stripped) = tp2_filename.strip_prefix("setup-") {
+                    found_tp2s.contains(stripped)
+                } else {
+                    found_tp2s.contains(&format!("setup-{}", tp2_filename))
+                }
+            };
+            result.insert(tp2_path.clone(), found);
         }
 
         Ok(result)
@@ -859,8 +471,6 @@ pub async fn download_mod(
     mod_name: String,
 ) -> Result<DownloadResult, String> {
     tauri::async_runtime::spawn_blocking(move || {
-    use std::io::{Read, Write};
-
     let _ = app.emit("download-progress", serde_json::json!({
         "mod_name": &mod_name, "status": "downloading", "bytes": 0, "total": 0
     }));
@@ -872,7 +482,7 @@ pub async fn download_mod(
         .build()
         .map_err(|e| format!("HTTP client error: {e}"))?
         .get(&url)
-        .header("User-Agent", "EET-Mod-Runner/0.8.0")
+        .header("User-Agent", "EET-Mod-Runner/0.9.0-beta")
         .send()
         .map_err(|e| format!("Download failed: {e}"))?;
 
@@ -1438,10 +1048,32 @@ fn gui_log_path() -> Result<std::path::PathBuf, String> {
     Ok(app_dir.join("gui.log"))
 }
 
+/// Rotate gui.log if it's over 500KB — keeps the last ~100KB.
+/// Called once per session on first write.
+fn maybe_rotate_gui_log() {
+    static ROTATED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if ROTATED.swap(true, std::sync::atomic::Ordering::SeqCst) { return; }
+
+    let Ok(path) = gui_log_path() else { return };
+    let Ok(meta) = std::fs::metadata(&path) else { return };
+    if meta.len() <= 512_000 { return; } // 500KB threshold
+
+    // Keep last ~100KB of content
+    if let Ok(content) = std::fs::read_to_string(&path) {
+        let keep_from = content.len().saturating_sub(100_000);
+        // Find the next newline after keep_from to avoid cutting mid-line
+        let start = content[keep_from..].find('\n').map(|i| keep_from + i + 1).unwrap_or(keep_from);
+        let trimmed = format!("--- Log rotated (kept last {}KB of {}KB) ---\n{}",
+            (content.len() - start) / 1024, content.len() / 1024, &content[start..]);
+        let _ = std::fs::write(&path, trimmed);
+    }
+}
+
 /// Append an entry to gui.log. Timestamp provided by the frontend (ISO format).
 #[tauri::command]
 pub fn gui_log(timestamp: String, level: String, category: String, message: String) -> Result<(), String> {
     use std::io::Write;
+    maybe_rotate_gui_log();
     let path = gui_log_path()?;
     let mut file = std::fs::OpenOptions::new()
         .create(true)
@@ -1502,6 +1134,21 @@ fn which(name: &str) -> Result<String, ()> {
 }
 
 // ─── Download Plan Cache ───
+
+/// Write a filtered WeiDU.log to a temp file for mod_installer.
+/// Used when the user has excluded components from the install order.
+#[tauri::command]
+pub async fn write_temp_log(content: String, filename: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let temp_dir = std::env::temp_dir().join("eet-mod-runner");
+        std::fs::create_dir_all(&temp_dir)
+            .map_err(|e| format!("Failed to create temp dir: {e}"))?;
+        let path = temp_dir.join(&filename);
+        std::fs::write(&path, &content)
+            .map_err(|e| format!("Failed to write temp log: {e}"))?;
+        Ok(path.to_string_lossy().to_string())
+    }).await.map_err(|e| e.to_string())?
+}
 
 /// Path to the download plan cache file in the app config directory.
 fn download_cache_path() -> Result<std::path::PathBuf, String> {
@@ -1578,6 +1225,241 @@ pub fn save_install_report(report_json: String, path: String) -> Result<(), Stri
     }
     std::fs::write(dest, &report_json)
         .map_err(|e| format!("Failed to write install report: {e}"))
+}
+
+// ─── Native WeiDU Installer ───
+
+use crate::installer::orchestrator::{InstallState, PausePoint, run_eet_install};
+use crate::installer::{InstallConfig, ErrorDecision};
+
+/// Global install state — shared between the orchestrator thread and Tauri commands.
+static NATIVE_INSTALL_STATE: std::sync::LazyLock<InstallState> =
+    std::sync::LazyLock::new(InstallState::new);
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeInstallArgs {
+    pub weidu_path: String,
+    pub bg2_game_dir: String,
+    pub bg1_game_dir: Option<String>,
+    pub mod_directory: String,
+    pub eet_log_path: String,
+    pub bgee_log_path: Option<String>,
+    pub language: String,
+    pub language_index: u32,
+    pub skip_installed: bool,
+    pub timeout: u64,
+    pub never_abort: bool,
+    pub abort_on_warnings: bool,
+    pub weidu_log_mode: String,
+    pub max_batch_size: Option<usize>,
+    pub pause_points: Vec<PausePointArg>,
+    pub bcs_scanner: Option<bool>,
+    pub auto_skip_after_retry: Option<bool>,
+    pub suppress_readmes: Option<bool>,
+    pub data_directory: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PausePointArg {
+    pub after_mod_index: usize,
+    pub message: String,
+    pub phase: String,
+}
+
+/// Start a native EET install — replaces mod_installer entirely.
+/// Runs in a background thread, streaming events to the GUI.
+#[tauri::command]
+pub async fn start_native_install(
+    app: AppHandle,
+    args: NativeInstallArgs,
+) -> Result<(), String> {
+    if NATIVE_INSTALL_STATE.running.load(std::sync::atomic::Ordering::SeqCst) {
+        return Err("Install already running".to_string());
+    }
+
+    let mut config = InstallConfig {
+        weidu_path: std::path::PathBuf::from(&args.weidu_path),
+        bg2_game_dir: std::path::PathBuf::from(&args.bg2_game_dir),
+        bg1_game_dir: args.bg1_game_dir.as_ref().map(std::path::PathBuf::from),
+        mod_directory: std::path::PathBuf::from(&args.mod_directory),
+        language: args.language.clone(),
+        language_index: args.language_index,
+        max_batch_size: args.max_batch_size.unwrap_or(25),
+        skip_installed: args.skip_installed,
+        timeout_secs: args.timeout,
+        weidu_log_mode: args.weidu_log_mode.clone(),
+        never_abort: args.never_abort,
+        abort_on_warnings: args.abort_on_warnings,
+        post_copy_delay_ms: 0, // sync_all() handles flush; delay only needed for network drives
+        ocamlrunparam: "s=16M,o=500,O=1000000".to_string(),
+        bcs_scanner: args.bcs_scanner.unwrap_or(false),
+        auto_skip_after_retry: args.auto_skip_after_retry.unwrap_or(false),
+        suppress_readmes: args.suppress_readmes.unwrap_or(true),
+        sibling_directories: std::collections::HashMap::new(),
+        readln_defaults: std::collections::HashMap::new(),
+        readln_fallback: "1".to_string(),
+        readln_timeout_secs: 30,
+        data_directory: args.data_directory.clone(),
+        tlk_prewarm: true,
+        tlk_fast_drive: false,
+        tlk_fast_drive_path: None,
+    };
+
+    // Load runtime config (readln defaults, etc.) from bundled install_config.json
+    if let Ok(exe_dir) = std::env::current_exe().and_then(|p| Ok(p.parent().unwrap_or(std::path::Path::new(".")).to_path_buf())) {
+        let rt = crate::installer::RuntimeConfig::load(&exe_dir);
+        config.readln_defaults = rt.readln_defaults;
+        config.readln_fallback = rt.readln_fallback;
+        config.readln_timeout_secs = rt.readln_timeout_secs;
+        config.sibling_directories = rt.sibling_directories.clone();
+    }
+
+    let pause_points: Vec<PausePoint> = args.pause_points.iter().map(|p| PausePoint {
+        after_mod_index: p.after_mod_index,
+        message: p.message.clone(),
+        phase: p.phase.clone(),
+    }).collect();
+
+    let eet_log = std::path::PathBuf::from(&args.eet_log_path);
+    let bgee_log = args.bgee_log_path.as_ref().map(std::path::PathBuf::from);
+
+    // Run the install in a background thread
+    tauri::async_runtime::spawn_blocking(move || {
+        let bgee_ref = bgee_log.as_deref();
+        // run_eet_install emits install:complete via tracker internally
+        let _summary = run_eet_install(
+            &app, &config, bgee_ref, &eet_log, &pause_points, &NATIVE_INSTALL_STATE,
+        );
+    });
+
+    Ok(())
+}
+
+/// Run a dry run — validates the pipeline without executing WeiDU.
+#[tauri::command]
+pub async fn start_dry_run(
+    app: AppHandle,
+    args: NativeInstallArgs,
+) -> Result<(), String> {
+    let mut config = InstallConfig {
+        weidu_path: std::path::PathBuf::from(&args.weidu_path),
+        bg2_game_dir: std::path::PathBuf::from(&args.bg2_game_dir),
+        bg1_game_dir: args.bg1_game_dir.as_ref().map(std::path::PathBuf::from),
+        mod_directory: std::path::PathBuf::from(&args.mod_directory),
+        language: args.language.clone(),
+        language_index: 0,
+        max_batch_size: args.max_batch_size.unwrap_or(25),
+        skip_installed: args.skip_installed,
+        timeout_secs: args.timeout,
+        weidu_log_mode: args.weidu_log_mode.clone(),
+        never_abort: true,
+        abort_on_warnings: false,
+        post_copy_delay_ms: 0,
+        ocamlrunparam: String::new(),
+        bcs_scanner: false,
+        auto_skip_after_retry: false,
+        suppress_readmes: true,
+        sibling_directories: std::collections::HashMap::new(),
+        readln_defaults: std::collections::HashMap::new(),
+        readln_fallback: "1".to_string(),
+        readln_timeout_secs: 30,
+        data_directory: args.data_directory.clone(),
+        tlk_prewarm: true,
+        tlk_fast_drive: false,
+        tlk_fast_drive_path: None,
+    };
+
+    if let Ok(exe_dir) = std::env::current_exe().and_then(|p| Ok(p.parent().unwrap_or(std::path::Path::new(".")).to_path_buf())) {
+        let rt = crate::installer::RuntimeConfig::load(&exe_dir);
+        config.readln_defaults = rt.readln_defaults;
+        config.readln_fallback = rt.readln_fallback;
+        config.readln_timeout_secs = rt.readln_timeout_secs;
+        config.sibling_directories = rt.sibling_directories.clone();
+    }
+
+    let eet_log = std::path::PathBuf::from(&args.eet_log_path);
+    let bgee_log = args.bgee_log_path.as_ref().map(std::path::PathBuf::from);
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let bgee_ref = bgee_log.as_deref();
+        let _report = crate::installer::dry_run::run_dry_run(
+            &app, &config, bgee_ref, &eet_log,
+        );
+    });
+
+    Ok(())
+}
+
+/// Send a Retry/Skip/Stop decision to the running install.
+#[tauri::command]
+pub fn install_decision(decision: String) -> Result<(), String> {
+    let d = match decision.as_str() {
+        "retry" => ErrorDecision::Retry,
+        "skip" => ErrorDecision::Skip,
+        "stop" => ErrorDecision::Stop,
+        _ => return Err(format!("Unknown decision: {decision}")),
+    };
+    if let Ok(mut lock) = NATIVE_INSTALL_STATE.decision.lock() {
+        *lock = Some(d);
+    }
+    Ok(())
+}
+
+/// Pause the native install at the next batch boundary.
+#[tauri::command]
+pub fn install_pause() -> Result<(), String> {
+    NATIVE_INSTALL_STATE.paused.store(true, std::sync::atomic::Ordering::SeqCst);
+    Ok(())
+}
+
+/// Resume a paused native install.
+#[tauri::command]
+pub fn install_resume() -> Result<(), String> {
+    NATIVE_INSTALL_STATE.paused.store(false, std::sync::atomic::Ordering::SeqCst);
+    Ok(())
+}
+
+/// Send input text to the running WeiDU process.
+#[tauri::command]
+pub fn install_send_input(text: String) -> Result<(), String> {
+    crate::installer::runner::send_input(&text)
+}
+
+/// Check if a previous install was interrupted (crash recovery).
+/// Returns the checkpoint data if found, null otherwise.
+#[tauri::command]
+pub fn check_install_checkpoint(game_dir: String, data_directory: Option<String>) -> Result<Option<serde_json::Value>, String> {
+    // Build a minimal config just for resolve_data_dir
+    let config = InstallConfig {
+        weidu_path: std::path::PathBuf::new(),
+        bg2_game_dir: std::path::PathBuf::from(&game_dir),
+        bg1_game_dir: None,
+        mod_directory: std::path::PathBuf::new(),
+        language: String::new(), language_index: 0,
+        max_batch_size: 25, skip_installed: true, timeout_secs: 7200,
+        weidu_log_mode: String::new(), never_abort: false, abort_on_warnings: false,
+        post_copy_delay_ms: 0, ocamlrunparam: String::new(),
+        bcs_scanner: false, auto_skip_after_retry: false, suppress_readmes: true,
+        sibling_directories: std::collections::HashMap::new(),
+        readln_defaults: std::collections::HashMap::new(),
+        readln_fallback: String::new(), readln_timeout_secs: 30,
+        data_directory,
+        tlk_prewarm: true, tlk_fast_drive: false, tlk_fast_drive_path: None,
+    };
+    let data_dir = crate::installer::resolve_data_dir(&config);
+    // Also check old location for migration
+    let result = crate::installer::orchestrator::read_checkpoint(&data_dir);
+    if result.is_some() { return Ok(result); }
+    Ok(crate::installer::orchestrator::read_checkpoint(std::path::Path::new(&game_dir)))
+}
+
+/// Abort the native install (graceful → force kill).
+#[tauri::command]
+pub fn abort_native_install() -> Result<(), String> {
+    NATIVE_INSTALL_STATE.abort_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+    crate::installer::runner::abort_weidu()
 }
 
 // ─── Pre-Install Patcher ───
@@ -1765,6 +1647,9 @@ fn check_marker(
     }
 }
 
+// TODO: If user/mod-supplied patch manifests are ever supported, add path traversal
+// validation here: canonicalize resolved paths and verify they start with mod_dir/game_dir.
+// Currently safe because the manifest is bundled as a Tauri resource and authored by us.
 fn apply_patch_ops(
     mod_dir: &Path,
     game_dir: &Path,
@@ -1804,9 +1689,40 @@ fn apply_patch_ops(
                 let contents = std::fs::read_to_string(&filepath)
                     .map_err(|e| format!("read failed {}: {e}", filepath.display()))?;
                 let new_contents = contents.replace(find, replace_str);
-                if new_contents != contents {
+                if new_contents == contents {
+                    // Find text not found — check if it's a line-ending mismatch
+                    let find_normalized = find.replace("\r\n", "\n");
+                    let contents_normalized = contents.replace("\r\n", "\n");
+                    let normalized_result = contents_normalized.replace(&find_normalized, replace_str);
+                    if normalized_result != contents_normalized {
+                        // Line-ending mismatch — write with normalized content
+                        std::fs::write(&filepath, &normalized_result)
+                            .map_err(|e| format!("write failed {}: {e}", filepath.display()))?;
+                    } else {
+                        return Err(format!("find text not found in {}", filepath.display()));
+                    }
+                } else {
                     std::fs::write(&filepath, &new_contents)
                         .map_err(|e| format!("write failed {}: {e}", filepath.display()))?;
+                }
+            }
+            "copy_if_missing" => {
+                // Copy from one mod path to another mod path, only if dest doesn't exist.
+                // Used to restore source files consumed by previous MOVE operations.
+                let src = op.get("src").and_then(|v| v.as_str())
+                    .ok_or("copy_if_missing op missing src")?;
+                let dest = op.get("dest").and_then(|v| v.as_str())
+                    .ok_or("copy_if_missing op missing dest")?;
+                let src_path = resolve_mod_path_with_map(mod_dir, src, mod_locations)
+                    .unwrap_or_else(|| mod_dir.join(src));
+                let dest_path = resolve_mod_path_with_map(mod_dir, dest, mod_locations)
+                    .unwrap_or_else(|| mod_dir.join(dest));
+                if !dest_path.exists() && src_path.exists() {
+                    if let Some(parent) = dest_path.parent() {
+                        std::fs::create_dir_all(parent).ok();
+                    }
+                    std::fs::copy(&src_path, &dest_path)
+                        .map_err(|e| format!("copy_if_missing failed {} → {}: {e}", src_path.display(), dest_path.display()))?;
                 }
             }
             "rename" => {
@@ -2003,4 +1919,115 @@ pub async fn apply_patches(
 
         Ok(results)
     }).await.map_err(|e| e.to_string())?
+}
+
+// ─── Backup & Restore ───
+
+use crate::backup;
+
+/// Global backup state — shared between the backup thread and Tauri commands.
+static BACKUP_STATE: std::sync::LazyLock<BackupState> =
+    std::sync::LazyLock::new(BackupState::new);
+
+struct BackupState {
+    abort_flag: std::sync::atomic::AtomicBool,
+    running: std::sync::atomic::AtomicBool,
+}
+
+impl BackupState {
+    fn new() -> Self {
+        Self {
+            abort_flag: std::sync::atomic::AtomicBool::new(false),
+            running: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn estimate_backup(
+    game_dir: String,
+    backup_dir: String,
+    mode: String,
+) -> Result<backup::BackupEstimate, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        backup::estimate_backup(Path::new(&game_dir), Path::new(&backup_dir), &mode)
+    }).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn create_backup(
+    app: AppHandle,
+    game_dir: String,
+    backup_dir: String,
+    name: String,
+    mode: String,
+) -> Result<backup::BackupManifest, String> {
+    if BACKUP_STATE.running.load(std::sync::atomic::Ordering::SeqCst) {
+        return Err("Backup already in progress".to_string());
+    }
+    if NATIVE_INSTALL_STATE.running.load(std::sync::atomic::Ordering::SeqCst) {
+        return Err("Cannot create backup while install is running".to_string());
+    }
+
+    BACKUP_STATE.abort_flag.store(false, std::sync::atomic::Ordering::SeqCst);
+    BACKUP_STATE.running.store(true, std::sync::atomic::Ordering::SeqCst);
+
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let r = backup::create_backup(
+            &app, Path::new(&game_dir), Path::new(&backup_dir),
+            &name, &mode, &BACKUP_STATE.abort_flag,
+        );
+        BACKUP_STATE.running.store(false, std::sync::atomic::Ordering::SeqCst);
+        r
+    }).await.map_err(|e| e.to_string())?;
+
+    result
+}
+
+#[tauri::command]
+pub async fn list_backups(backup_dir: String) -> Result<Vec<backup::BackupInfo>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        backup::list_backups(Path::new(&backup_dir))
+    }).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn restore_backup(
+    app: AppHandle,
+    backup_path: String,
+    game_dir: String,
+) -> Result<(), String> {
+    if BACKUP_STATE.running.load(std::sync::atomic::Ordering::SeqCst) {
+        return Err("Backup operation already in progress".to_string());
+    }
+    if NATIVE_INSTALL_STATE.running.load(std::sync::atomic::Ordering::SeqCst) {
+        return Err("Cannot restore while install is running".to_string());
+    }
+
+    BACKUP_STATE.abort_flag.store(false, std::sync::atomic::Ordering::SeqCst);
+    BACKUP_STATE.running.store(true, std::sync::atomic::Ordering::SeqCst);
+
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let r = backup::restore_backup(
+            &app, Path::new(&backup_path), Path::new(&game_dir),
+            &BACKUP_STATE.abort_flag,
+        );
+        BACKUP_STATE.running.store(false, std::sync::atomic::Ordering::SeqCst);
+        r
+    }).await.map_err(|e| e.to_string())?;
+
+    result
+}
+
+#[tauri::command]
+pub async fn delete_backup(backup_path: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        backup::delete_backup(Path::new(&backup_path))
+    }).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub fn abort_backup() -> Result<(), String> {
+    BACKUP_STATE.abort_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+    Ok(())
 }

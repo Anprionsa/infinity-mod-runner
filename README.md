@@ -2,29 +2,37 @@
 
 **Cross-platform desktop GUI for installing Baldur's Gate: Enhanced Edition Trilogy mods**
 
-A Tauri v2 app that wraps [mod_installer](https://github.com/dark0dave/mod_installer) with real-time progress monitoring, error categorization, and pre-flight validation. Designed as a companion to [EET Mod Forge](https://github.com/Anprionsa/eet-mod-forge) — configure your mod selection in the Forge, export the logs, and run the install here.
+A Tauri v2 app with a **native Rust WeiDU driver** — drives WeiDU directly (no subprocess wrapper), with real-time progress monitoring, per-batch error recovery, backups, and auto-update. Designed as a companion to [EET Mod Forge](https://github.com/Anprionsa/eet-mod-forge) — configure your mod selection in the Forge, export the logs, and run the install here.
 
 ## Features
 
-- **Setup wizard** — Configure BG1:EE and BG2:EE game directories with `chitin.key` validation (case-insensitive on Linux), game freshness detection, WeiDU and mod_installer auto-detection with version display
+- **Setup wizard** — Configure BG1:EE and BG2:EE game directories with `chitin.key` validation (case-insensitive on Linux), game freshness detection, WeiDU auto-detection with version display
 
-- **Dual log import** — Side-by-side import for WeiDU-BGEE.log and WeiDU.log. Wrong-slot detection warns if you swap the logs. Mod list grouped by phase (BGEE first, then EET). Paths persisted across sessions
+- **Mods panel** — Unified surface for importing Forge export logs, downloading missing mods, and browsing local state. GitHub mods download automatically via Forge's cached release data (no API key). Manual links for non-GitHub sources. Wrong-log-slot detection. Paths persisted across sessions
 
-- **Download manager** — Automatically downloads GitHub-hosted mods using Forge's cached release data (no API key needed). Shows manual download links for non-GitHub mods. Batch download with progress tracking. Per-mod "view" links open source pages in your browser
+- **Preset browser** — Load and save complete install configurations (mod list + install options) as reusable presets
 
-- **Pre-flight checks** — Validates essential mods, verifies all mods are downloaded (batch tp2 scan), fetches known issues and compat data from the hosted Forge. Progress bar during checks. Blocks install on critical errors
+- **Ready Check** — Consolidated pre-install validation: essential mods present, all mods downloaded (batch tp2 scan), resource limits (kits, spells per level), known issues / compat data from Forge, patch applicability. Progress bar during checks; blocks install on critical errors
 
-- **Pre-install patcher** — 35 bundled patches fix known mod bugs in the Extracted source before mod_installer runs. Scans for applicable patches, shows checklist, applies with one click. Idempotent marker detection. Handles double-nested and arbitrarily-named mod directories via tp2-based discovery
+- **Pre-install patcher** — 35+ bundled patches fix known mod bugs in the Extracted source before WeiDU runs. Scans for applicable patches, shows checklist, applies with one click. Idempotent marker detection. Handles double-nested and arbitrarily-named mod directories via tp2-based discovery. Runtime-configurable via `patches/install_config.json` (READLN defaults, sibling dirs, force-small-batch list, OCaml GC)
 
-- **Install runner** — Real-time dashboard with triple-source progress tracking (install_status.json + stdout counter + weidu.log ground truth). Activity indicator shows install is alive during long components. Graceful abort (Ctrl+C with 10s fallback). Pause with user-facing banner. All mod_installer CLI flags exposed
+- **Backup system** — Estimate/create/restore/delete snapshots of the game directory before an install. Progress events during long operations; abortable. Multiple named backups per game
 
-- **Issues panel** — Errors grouped by mod with expandable details. Exit code categorization (WeiDU Crash / Install Failed / Unknown). Skip reason distinction (expected vs suspicious). Sorted by severity
+- **Install runner** — Native WeiDU driver with real-time dashboard. Per-batch error recovery (Retry / Skip / Stop). Triple-source progress tracking (install log + stdout counter + weidu.log ground truth). Activity indicator, graceful abort (Ctrl+C with 10s fallback), pause/resume with user-facing banner, checkpoint on interrupt. EET two-phase support. Dry-run mode
 
-- **Debug analysis** — Parses 500MB+ WSETUP.DEBUG files in the Rust backend. Collapsible sections for errors, known issues, warnings, unmatched issues, and installed components. Grouped by type with occurrence counts. Copy buttons on every section. Per-mod `ki` known issues fetched from Forge
+- **Issues panel** — Errors grouped by mod with expandable details. Exit-code categorization (WeiDU Crash / Install Failed / Unknown). Skip-reason distinction (expected vs suspicious). Sorted by severity
+
+- **Debug analysis** — Parses 500 MB+ WSETUP.DEBUG files in the Rust backend. Collapsible sections for errors, known issues, warnings, unmatched issues, and installed components. Grouped by type with occurrence counts. Copy buttons on every section. Per-mod `ki` known issues fetched from Forge
 
 - **Install comparison** — Compare Forge export against installed WeiDU.log. Shows exactly which mods are completely missing vs partially installed. Uses imported log paths automatically
 
-- **GUI logger** — `gui.log` for diagnosing GUI-only issues, separate from WeiDU/mod_installer output
+- **Install report** — Export a structured post-install report (JSON) summarizing outcomes, errors, skipped components, and elapsed time
+
+- **Auto-update** — Signed releases via Tauri updater (minisign). Checks GitHub `latest.json` and applies updates in place
+
+- **Internationalization** — UI available in English, German, French, and Polish (`src/lang/`)
+
+- **GUI logger** — `gui.log` for diagnosing GUI-only issues, separate from WeiDU output
 
 - **Forge color scheme** — Dark backgrounds with gold accents matching EET Mod Forge
 
@@ -34,17 +42,23 @@ A Tauri v2 app that wraps [mod_installer](https://github.com/dark0dave/mod_insta
 Frontend (React 18 + TypeScript + Vite)
   |
   |-- invoke() ──> Rust backend (Tauri v2)
-  |                  |-- std::process::Command ──> mod_installer
-  |                  |-- File I/O (install_status.json, install_errors.log)
+  |                  |-- installer/ ──> Native WeiDU driver
+  |                  |      (orchestrator, runner, batch/dry-run, debug_mgr,
+  |                  |       pe_patch, tlk_accel, install_log/log_diff, tracker, copy)
+  |                  |-- backup.rs ──> Game-dir snapshot system
+  |                  |-- Patch scanner/applier (patches/*)
   |                  |-- HTTP downloads (reqwest) ──> GitHub archives, direct URLs
   |                  |-- Config persistence (confy)
+  |                  |-- Tauri updater (minisign)
   |
   |-- fetch() ───> Hosted Forge data (mods-index, version_cache, github_mods, ki)
 ```
 
-- **mod_installer** is invoked as a subprocess — no library coupling
+- **Native WeiDU driver** replaces the old mod_installer subprocess — WeiDU is invoked directly with piped I/O, per-batch Retry/Skip/Stop error recovery, checkpoints, pause/resume, EET two-phase support (~4300 lines across 13 modules in `src-tauri/src/installer/`)
+- **Per-game data dir** — WeiDU process lockfile, install log, checkpoint, and backups are stored in a FNV-1a-hashed subfolder so multiple game installs don't collide
+- **Runtime-configurable** — `patches/install_config.json` tunes READLN auto-answers, sibling directories, force-small-batch mods, OCaml GC, PE stack reserve — without rebuilding
 - **Forge data** is fetched at runtime — no database shipped with the GUI
-- **Process management** entirely in Rust — spawn, stdout/stderr streaming via events, stdin pipe, process tree kill
+- **Process management** entirely in Rust — spawn, stdout/stderr streaming via events, stdin pipe, process tree kill, force-kill on app close
 
 ## Building
 
@@ -90,6 +104,26 @@ npm run tauri build
 [MIT](LICENSE)
 
 ## Changelog
+
+### v0.9.0 (2026-04-13)
+- **Native WeiDU installer** — Replaced the `mod_installer` subprocess with a native Rust WeiDU driver (`src-tauri/src/installer/`, ~4300 lines across 13 modules: orchestrator, runner, batch, engine, dry_run, debug_mgr, pe_patch, tlk_accel, install_log, log_diff, tracker, copy). WeiDU is invoked directly with piped I/O; no more `mod_installer` dependency
+- **Per-batch error recovery** — When a batch fails, user can Retry, Skip the batch, or Stop the install. Auto-retry-once-then-skip mode available
+- **Install checkpoints** — Progress is persisted per game so interrupted installs can report where they left off
+- **Dry-run mode** — Walk the plan without writing anything, surfacing issues (missing tp2, bad paths, READLN prompts) before a real install
+- **Backup system** — Estimate, create, list, restore, delete, and abort backups of the game directory. Progress events during long operations (`src-tauri/src/backup.rs`, 800 lines; `BackupPanel.tsx`)
+- **Auto-update** — Tauri updater plugin with minisign signing. `latest.json` generated in CI; client checks GitHub releases and installs updates in place
+- **Preset browser** — Load/save complete install configurations (`PresetBrowser.tsx`)
+- **Ready Check panel** — Consolidates old Pre-Flight + download checks + patch scan + resource limits into one surface (`ReadyCheck.tsx`)
+- **Mods panel** — Unified import + download + browse UI (`ModsPanel.tsx`); replaces separate Import and Download tabs
+- **Install report export** — Structured post-install JSON (`src/lib/install-report.ts`)
+- **Internationalization** — UI strings moved to `src/lang/{en,de,fr,pl}.json` via `src/lib/i18n.tsx`
+- **Telemetry** — Optional, opt-in reporting (`src/lib/telemetry.ts`)
+- **Runtime-configurable install params** — `patches/install_config.json` controls READLN defaults per mod, fallback answer, READLN timeout, sibling directories (for mods that need junctioned peers), force-small-batch mods, OCaml GC tuning, PE stack reserve — editable without rebuilding
+- **Per-game data dir** — WeiDU lockfile, install log, checkpoint, and backups live in a FNV-1a-hashed subfolder based on game path, so multiple game installs don't collide
+- **Force-kill on close** — `on_window_event` terminates WeiDU immediately on app quit; avoids orphaned processes holding file locks
+- **New bundled patches** — `bristlelick`, `walahnan`; patch manifest expanded
+- **CI signing + release manifest** — Workflow signs artifacts with `TAURI_SIGNING_PRIVATE_KEY`, collects `.sig` files, and emits `latest.json` pointing at real platform URLs (Windows `.exe`, Linux `.AppImage`, macOS `.app.tar.gz`)
+- **Dependencies** — Added `indexmap`, `fs2`, `tauri-plugin-updater`, `tauri-plugin-process`
 
 ### v0.8.0 (2026-04-08)
 - **Pre-install patcher** — 35 bundled patches for known mod bugs. Scans Extracted directory by tp2 filename (handles any folder naming). Patch types: file copy, text replace, file rename, mkdir, game dir copy, game dir append, game dir write. Marker-based idempotence. Checklist UI in Pre-Flight tab with scan/apply/re-scan flow

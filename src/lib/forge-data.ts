@@ -168,7 +168,20 @@ export interface ResourceUsage {
 /** Known engine hard limits */
 const KIT_LIMIT = 256;       // Total kit slots in KITLIST.2DA
 const SPELL_LEVEL_CAP = 50;  // Max spells per level per type in SPELL.IDS
-const VANILLA_KITS = 55;     // Approximate vanilla kit count
+let VANILLA_KITS = 37;       // Loaded from kits-vanilla.json at runtime
+
+/** Fetch the vanilla kit count from Forge data. */
+async function loadVanillaKitCount(baseUrl: string): Promise<void> {
+  try {
+    const resp = await fetch(`${baseUrl}/data/kits-vanilla.json`);
+    if (resp.ok) {
+      const data = await resp.json();
+      VANILLA_KITS = typeof data === "object" && !Array.isArray(data)
+        ? Object.keys(data).length
+        : Array.isArray(data) ? data.length : 37;
+    }
+  } catch { /* use default */ }
+}
 
 /**
  * Fetch mod detail files and aggregate resource usage (kits, spells)
@@ -180,6 +193,9 @@ export async function fetchResourceUsage(
   baseUrl: string,
   modComponents: Map<string, string[]>,
 ): Promise<ResourceUsage> {
+  // Load vanilla kit count from Forge if not already loaded
+  await loadVanillaKitCount(baseUrl);
+
   const result: ResourceUsage = {
     totalKits: 0,
     kitDetails: [],
@@ -368,15 +384,7 @@ export interface ModIndexEntry {
   [key: string]: unknown;
 }
 
-/** GitHub mod metadata from github_mods.json */
-export interface GitHubMod {
-  i: number;  // mod ID
-  o: string;  // owner
-  r: string;  // repo
-  pushed?: string;
-  stars?: number;
-  archived?: boolean;
-}
+// GitHubMod interface removed — github_mods.json deleted, data absorbed into per-mod gh field
 
 /** Version cache entry from version_cache.json */
 export interface VersionCacheEntry {
@@ -401,14 +409,7 @@ export async function fetchModIndex(
   return resp.json();
 }
 
-/** Fetch GitHub mod metadata */
-export async function fetchGitHubMods(
-  baseUrl: string,
-): Promise<GitHubMod[]> {
-  const resp = await fetch(`${baseUrl}/data/github_mods.json`);
-  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-  return resp.json();
-}
+// fetchGitHubMods removed — github_mods.json deleted, data in per-mod gh field
 
 /** Fetch version cache (GitHub release info) */
 export async function fetchVersionCache(
@@ -439,7 +440,6 @@ export function buildDownloadInfo(
   tp2Name: string,
   displayName: string,
   modIndex: Record<string, ModIndexEntry>,
-  _githubMods: GitHubMod[],
   versionCache: VersionCache,
 ): DownloadInfo {
   // Find the mod in the index by tp2 name
@@ -518,3 +518,214 @@ export function buildDownloadInfo(
     source: "manual", siteName,
   };
 }
+
+// ─── Presets & Community Builds ───
+
+export const TELEMETRY_BASE_URL = "https://anprionsa.github.io/eet-mod-telemetry";
+
+export interface ForgePreset {
+  id: string;
+  name: string;
+  desc: string;
+  icon: string;
+  color: string;
+  keys: string[];
+  tier?: number;
+  difficulty?: string;
+  hash?: string;
+}
+
+export interface CommunityBuildMeta {
+  id: string;
+  name: string;
+  desc: string;
+  author: string;
+  icon: string;
+  color: string;
+  tier: number;
+  difficulty: string;
+  focus: string[];
+  modCount: number;
+  componentCount: number;
+  forgeVersion: string;
+  createdAt: string;
+}
+
+export interface CommunityBuild extends CommunityBuildMeta {
+  keys: string[];
+}
+
+export async function fetchPresets(baseUrl: string): Promise<ForgePreset[]> {
+  const resp = await fetch(`${baseUrl}/data/presets.json`);
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  return resp.json();
+}
+
+export async function fetchCommunityBuildIndex(telemetryUrl?: string): Promise<CommunityBuildMeta[]> {
+  const base = telemetryUrl || TELEMETRY_BASE_URL;
+  const urls = [
+    `${base}/data/builds/_index.json`,
+    "https://raw.githubusercontent.com/Anprionsa/eet-mod-telemetry/main/data/builds/_index.json",
+  ];
+  for (const url of urls) {
+    try {
+      const resp = await fetch(url);
+      if (resp.ok) {
+        const text = await resp.text();
+        if (text.startsWith("[") || text.startsWith("{")) return JSON.parse(text);
+      }
+    } catch { /* try next */ }
+  }
+  return [];
+}
+
+export async function fetchCommunityBuild(id: string, telemetryUrl?: string): Promise<CommunityBuild | null> {
+  const base = telemetryUrl || TELEMETRY_BASE_URL;
+  const urls = [
+    `${base}/data/builds/${id}.json`,
+    `https://raw.githubusercontent.com/Anprionsa/eet-mod-telemetry/main/data/builds/${id}.json`,
+  ];
+  for (const url of urls) {
+    try {
+      const resp = await fetch(url);
+      if (resp.ok) {
+        const text = await resp.text();
+        if (text.startsWith("{")) return JSON.parse(text);
+      }
+    } catch { /* try next */ }
+  }
+  return null;
+}
+
+/** BG1:EE phase categories — mods in these categories go to the bgee log */
+const BGEE_CATEGORIES = new Set(["PRE EET BGEE MODS"]);
+
+/**
+ * Resolve preset/build keys into WeiDU.log text.
+ * Keys are "modId-compIdx" (e.g., "3-0" = DLC Merger component 0).
+ * Returns separate EET and BG1:EE logs.
+ */
+export async function resolvePresetToLog(
+  baseUrl: string,
+  keys: string[],
+  language: string,
+): Promise<{ eetLog: string; bgeeLog: string | null; modCount: number; skipped: number }> {
+  // Fetch mod index
+  const indexResp = await fetch(`${baseUrl}/data/mods-index.json`);
+  if (!indexResp.ok) throw new Error(`Failed to fetch mod index: ${indexResp.status}`);
+  const indexArr: Record<string, unknown>[] = await indexResp.json();
+
+  // Build id → mod lookup
+  const modsById = new Map<number, Record<string, unknown>>();
+  for (const entry of indexArr) {
+    const id = entry.i as number;
+    if (id !== undefined) modsById.set(id, entry);
+  }
+
+  // Category install order — must match Forge's categories.json
+  // Hardcoded as fallback since categories.json may not be deployed
+  const CATEGORY_ORDER: string[] = [
+    "PRE EET BGEE MODS", "EET STARTS HERE", "ENGINE", "INTERFACE",
+    "GRAPHICAL AND SOUND OVERWRITE MODS", "RESTORATIONS",
+    "QUEST MODS BG1", "QUEST MODS BG2", "QUEST MODS ToB",
+    "NEW NPC MODS", "NPC EXPANSIONS", "NPC CROSSMOD", "CREATURE MODS",
+    "ITEM ADDITION MODS", "SPELL MODS", "KIT & CLASS MODS",
+    "PRE-TACTICAL TWEAKS", "TACTICAL MODS", "POST-TACTICAL TWEAKS",
+    "NPC CUSTOMIZATION", "POST-TACTICAL QUESTS",
+    "MUSIC & AUDIO", "PORTRAITS", "EET FINALIZATION", "POST EET",
+  ];
+  const categoryOrder = new Map<string, number>();
+  CATEGORY_ORDER.forEach((name, idx) => categoryOrder.set(name, idx));
+
+  // Try to fetch fresh order from Forge (overrides hardcoded if available)
+  try {
+    const catResp = await fetch(`${baseUrl}/data/categories.json`);
+    if (catResp.ok) {
+      const catData = await catResp.json();
+      const cats = catData.categories || {};
+      let idx = 0;
+      for (const name of Object.keys(cats)) {
+        categoryOrder.set(name, idx++);
+      }
+    }
+  } catch { /* use hardcoded fallback */ }
+
+  // Collect all resolved components with their sort order
+  interface ResolvedComp {
+    line: string;
+    isBgee: boolean;
+    catOrder: number; // category position in install order
+    ord: number;      // mod order within category
+    compIdx: number;  // component index within mod (for stable sort)
+  }
+  const resolved: ResolvedComp[] = [];
+  let skipped = 0;
+  const seenMods = new Set<string>();
+
+  for (const key of keys) {
+    const dashIdx = key.indexOf("-");
+    if (dashIdx < 0) { skipped++; continue; }
+    const modId = parseInt(key.substring(0, dashIdx), 10);
+    const compIdx = parseInt(key.substring(dashIdx + 1), 10);
+    if (isNaN(modId) || isNaN(compIdx)) { skipped++; continue; }
+
+    const mod = modsById.get(modId);
+    if (!mod) { skipped++; continue; }
+
+    const tp2Name = (mod.t as string) || "";
+    const coWC = (mod.coWC as number[]) || [];
+    const coWF = (mod.coWF as (string | null)[]) || [];
+    const coNames = (mod.coNames as string[]) || [];
+    const langs = (mod.langs as Record<string, number>) || {};
+    const category = (mod.c as string) || "";
+    const ord = (mod.ord as number) ?? 9999;
+
+    if (compIdx >= coWC.length) { skipped++; continue; }
+
+    const weiduComp = coWC[compIdx];
+    const rawFolder = compIdx < coWF.length ? coWF[compIdx] : null;
+    const folder = (rawFolder != null && rawFolder !== "") ? rawFolder : tp2Name;
+    const compName = (compIdx < coNames.length && coNames[compIdx]) ? coNames[compIdx] : `Component ${weiduComp}`;
+    const langIdx = langs[language] ?? langs["en"] ?? 0;
+
+    // Build WeiDU log line — use folder name for both path parts
+    // WeiDU resolves "folder\folder.tp2" or "folder\setup-folder.tp2" automatically
+    const tp2Path = `${folder}\\${folder}.TP2`;
+    const line = `~${tp2Path}~ #${langIdx} #${weiduComp} // ${compName}`;
+
+    seenMods.add(tp2Name.toLowerCase());
+    const catOrder = categoryOrder.get(category) ?? 999;
+    resolved.push({ line, isBgee: BGEE_CATEGORIES.has(category), catOrder, ord, compIdx });
+  }
+
+  // Sort by category order, then by mod order within category, then by component index
+  resolved.sort((a, b) => a.catOrder - b.catOrder || a.ord - b.ord || a.compIdx - b.compIdx);
+
+  const header = "// Log of Currently Installed WeiDU Mods";
+  const eetLines = [header, "// Generated by EET Mod Runner from Forge preset"];
+  const bgeeLines = [header, "// Generated by EET Mod Runner from Forge preset (BG1:EE phase)"];
+
+  for (const r of resolved) {
+    if (r.isBgee) bgeeLines.push(r.line);
+    else eetLines.push(r.line);
+  }
+
+  return {
+    eetLog: eetLines.join("\n"),
+    bgeeLog: bgeeLines.length > 2 ? bgeeLines.join("\n") : null,
+    modCount: seenMods.size,
+    skipped,
+  };
+}
+
+/** Focus tag display labels */
+export const FOCUS_LABELS: Record<string, string> = {
+  story: "Story & Quests",
+  npc: "Companions & NPCs",
+  tactical: "Smarter Enemies",
+  visual: "Visual & Audio",
+  qol: "Quality of Life",
+  romance: "Romance",
+  class: "Classes & Kits",
+  tweak: "Tweaks",
+};

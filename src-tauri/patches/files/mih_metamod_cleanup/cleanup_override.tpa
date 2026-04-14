@@ -22,6 +22,12 @@ BEGIN
   BEGIN
     MOVE "%BASH_FOR_FILESPEC%" "override/_eetmr_preserve/%BASH_FOR_FILE%"
   END
+  // FIX: Also preserve CAMPAIGN.2DA — EET_end needs it with correct row structure.
+  // MAKE_BIFF would incorporate it, then the override version is gone and EET_end's
+  // SET_2DA_ENTRY finds 0 rows.
+  ACTION_IF FILE_EXISTS "override/CAMPAIGN.2DA" BEGIN
+    MOVE "override/CAMPAIGN.2DA" "override/_eetmr_preserve/CAMPAIGN.2DA"
+  END
 
   MAKE_BIFF "mh#clean"
   BEGIN
@@ -45,6 +51,7 @@ BEGIN
     ACTION_IF NOT (~%BASH_FOR_FILE%~ STRING_EQUAL_CASE ~EET.flag~
                OR ~%BASH_FOR_FILE%~ STRING_MATCHES_REGEXP ~^.*\.ids$~ = 0
                OR ~%BASH_FOR_FILE%~ STRING_MATCHES_REGEXP ~^.*\.bcs$~ = 0
+               OR ~%BASH_FOR_FILE%~ STRING_EQUAL_CASE ~CAMPAIGN.2DA~
                OR ~%BASH_FOR_FILE%~ STRING_EQUAL_CASE ~_eetmr_preserve~) BEGIN
       DELETE "%BASH_FOR_FILESPEC%"
     END

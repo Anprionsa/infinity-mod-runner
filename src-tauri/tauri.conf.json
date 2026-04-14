@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/tauri-apps/tauri/dev/crates/tauri-config-schema/schema.json",
   "productName": "EET Mod Runner",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "identifier": "com.eetmodforge.runner",
   "build": {
     "frontendDist": "../dist",
@@ -39,5 +39,12 @@
       "patches/**/*"
     ]
   },
-  "plugins": {}
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDFFNTQyQzIyNTlENDMxMjkKUldRcE1kUlpJaXhVSGgwUE1PK1JUdWZPaXpjS1BpWldWaWRvRXJWS2hjZktLNXovNGwyUnBSczkK",
+      "endpoints": [
+        "https://github.com/Anprionsa/eet-mod-runner/releases/latest/download/latest.json"
+      ]
+    }
+  }
 }

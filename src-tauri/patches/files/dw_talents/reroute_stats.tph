@@ -66,34 +66,47 @@ DEFINE_ACTION_FUNCTION reroute_stats BEGIN
 	OUTER_SET cc_stat=IDS_OF_SYMBOL (stats CLERIC_CHAOTIC_COMMANDS)
 	OUTER_SET fs_stat=IDS_OF_SYMBOL (stats WIZARD_FIRE_SHIELD)
 	OUTER_SET si_stat=IDS_OF_SYMBOL (stats WIZARD_SPELL_IMMUNITY)
+	// _eetmr_bcs_safety: All DECOMPILE_AND_PATCH wrapped in PATCH_TRY for BCS round-trip safety
 	COPY_EXISTING_REGEXP ".*\.bcs" override
 		PATCH_IF NOT (~%SOURCE_RES%~ STRING_COMPARE_REGEXP ~BD.*~ = 0 OR ~%SOURCE_RES%~ STRING_EQUAL_CASE ~C#AJAN~ OR ~%SOURCE_RES%~ STRING_EQUAL_CASE ~A7!GXRU~) BEGIN
 		//chaotic commands
 		PATCH_IF INDEX_BUFFER (" %cc_stat% ")>=0 BEGIN
-			DECOMPILE_AND_PATCH BEGIN
-				REPLACE_TEXTUALLY "CheckStatGT(\([^,]*\),0,CLERIC_CHAOTIC_COMMANDS)" "CheckSpellState(\1,CHAOTIC_COMMANDS)"			
-				REPLACE_TEXTUALLY "CheckStat(\([^,]*\),0,CLERIC_CHAOTIC_COMMANDS)" "!CheckSpellState(\1,CHAOTIC_COMMANDS)"		
-				REPLACE_TEXTUALLY "!!" ""
+			PATCH_TRY
+				DECOMPILE_AND_PATCH BEGIN
+					REPLACE_TEXTUALLY "CheckStatGT(\([^,]*\),0,CLERIC_CHAOTIC_COMMANDS)" "CheckSpellState(\1,CHAOTIC_COMMANDS)"
+					REPLACE_TEXTUALLY "CheckStat(\([^,]*\),0,CLERIC_CHAOTIC_COMMANDS)" "!CheckSpellState(\1,CHAOTIC_COMMANDS)"
+					REPLACE_TEXTUALLY "!!" ""
+				END
+			WITH DEFAULT
+				PATCH_PRINT ~WARNING: [%SOURCE_FILE%] BCS round-trip failed in chaotic commands, skipping~
 			END
 		END
 		// fire shield (we assume only direct checks)
 		PATCH_IF INDEX_BUFFER (" %fs_stat% ")>=0 BEGIN
-			DECOMPILE_AND_PATCH BEGIN
-				REPLACE_TEXTUALLY "CheckStat(\([^,]*\),1,WIZARD_FIRE_SHIELD)" "CheckSpellState(\1,RED_FIRESHIELD)"		
-				REPLACE_TEXTUALLY "CheckStat(\([^,]*\),2,WIZARD_FIRE_SHIELD)" "CheckSpellState(\1,BLUE_FIRESHIELD)"		
+			PATCH_TRY
+				DECOMPILE_AND_PATCH BEGIN
+					REPLACE_TEXTUALLY "CheckStat(\([^,]*\),1,WIZARD_FIRE_SHIELD)" "CheckSpellState(\1,RED_FIRESHIELD)"
+					REPLACE_TEXTUALLY "CheckStat(\([^,]*\),2,WIZARD_FIRE_SHIELD)" "CheckSpellState(\1,BLUE_FIRESHIELD)"
+				END
+			WITH DEFAULT
+				PATCH_PRINT ~WARNING: [%SOURCE_FILE%] BCS round-trip failed in fire shield, skipping~
 			END
 		END
 		// spell immunity direct cases (we need to collect others for a disjunctive substitution)
 		PATCH_IF INDEX_BUFFER (" %si_stat% ")>=0 BEGIN
-			DECOMPILE_AND_PATCH BEGIN
-				REPLACE_TEXTUALLY "CheckStat(\([^,]*\),1,WIZARD_SPELL_IMMUNITY)" "CheckSpellState(\1,SI_ABJURATION)"	
-				REPLACE_TEXTUALLY "CheckStat(\([^,]*\),2,WIZARD_SPELL_IMMUNITY)" "CheckSpellState(\1,SI_CONJURATION)"	
-				REPLACE_TEXTUALLY "CheckStat(\([^,]*\),3,WIZARD_SPELL_IMMUNITY)" "CheckSpellState(\1,SI_DIVINATION)"	
-				REPLACE_TEXTUALLY "CheckStat(\([^,]*\),4,WIZARD_SPELL_IMMUNITY)" "CheckSpellState(\1,SI_ENCHANTMENT)"	
-				REPLACE_TEXTUALLY "CheckStat(\([^,]*\),5,WIZARD_SPELL_IMMUNITY)" "CheckSpellState(\1,SI_ILLUSION)"	
-				REPLACE_TEXTUALLY "CheckStat(\([^,]*\),6,WIZARD_SPELL_IMMUNITY)" "CheckSpellState(\1,SI_EVOCATION)"	
-				REPLACE_TEXTUALLY "CheckStat(\([^,]*\),7,WIZARD_SPELL_IMMUNITY)" "CheckSpellState(\1,SI_NECROMANCY)"	
-				REPLACE_TEXTUALLY "CheckStat(\([^,]*\),8,WIZARD_SPELL_IMMUNITY)" "CheckSpellState(\1,SI_TRANSMUTATION)"		
+			PATCH_TRY
+				DECOMPILE_AND_PATCH BEGIN
+					REPLACE_TEXTUALLY "CheckStat(\([^,]*\),1,WIZARD_SPELL_IMMUNITY)" "CheckSpellState(\1,SI_ABJURATION)"
+					REPLACE_TEXTUALLY "CheckStat(\([^,]*\),2,WIZARD_SPELL_IMMUNITY)" "CheckSpellState(\1,SI_CONJURATION)"
+					REPLACE_TEXTUALLY "CheckStat(\([^,]*\),3,WIZARD_SPELL_IMMUNITY)" "CheckSpellState(\1,SI_DIVINATION)"
+					REPLACE_TEXTUALLY "CheckStat(\([^,]*\),4,WIZARD_SPELL_IMMUNITY)" "CheckSpellState(\1,SI_ENCHANTMENT)"
+					REPLACE_TEXTUALLY "CheckStat(\([^,]*\),5,WIZARD_SPELL_IMMUNITY)" "CheckSpellState(\1,SI_ILLUSION)"
+					REPLACE_TEXTUALLY "CheckStat(\([^,]*\),6,WIZARD_SPELL_IMMUNITY)" "CheckSpellState(\1,SI_EVOCATION)"
+					REPLACE_TEXTUALLY "CheckStat(\([^,]*\),7,WIZARD_SPELL_IMMUNITY)" "CheckSpellState(\1,SI_NECROMANCY)"
+					REPLACE_TEXTUALLY "CheckStat(\([^,]*\),8,WIZARD_SPELL_IMMUNITY)" "CheckSpellState(\1,SI_TRANSMUTATION)"
+				END
+			WITH DEFAULT
+				PATCH_PRINT ~WARNING: [%SOURCE_FILE%] BCS round-trip failed in spell immunity, skipping~
 			END
 			SPRINT $si_subs("%SOURCE_RES%") ""
 		END

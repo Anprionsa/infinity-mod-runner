@@ -47,6 +47,15 @@ pub struct AppConfig {
     // Telemetry: None = never asked, Some(true) = opted in, Some(false) = opted out
     #[serde(default)]
     pub telemetry_opt_in: Option<bool>,
+    // Backup directory: where game snapshots are stored
+    #[serde(default)]
+    pub backup_directory: Option<String>,
+    // Data directory: where EETMR stores its own artifacts (logs, checkpoints, backups)
+    #[serde(default)]
+    pub data_directory: Option<String>,
+    // UI language (en, de, fr, pl)
+    #[serde(default)]
+    pub ui_language: Option<String>,
 }
 
 fn default_true() -> bool { true }
@@ -57,9 +66,4 @@ fn default_tick() -> u32 { 500 }
 fn default_lookback() -> u32 { 10 }
 fn default_weidu_log_mode() -> String { "autolog,logapp,log-extern".to_string() }
 
-impl AppConfig {
-    pub fn config_path() -> Option<std::path::PathBuf> {
-        dirs::config_dir().map(|p| p.join("eet-mod-runner"))
-    }
-}
 

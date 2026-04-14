@@ -37,10 +37,17 @@ export function parseWeiduLog(raw: string): LogEntry[] {
     let sub_component = "";
     let version = "";
 
+    // Version is after the last colon, but only if it looks like a version string
+    // (e.g., "1.0", "v2.3.1", "35.21", "Beta 4"). Avoid splitting on colons
+    // that are part of the component name (e.g., "Imoen 4 Ever in SoD: Imoen Returns...")
     const versionIdx = comment.lastIndexOf(":");
     if (versionIdx > 0) {
-      version = comment.slice(versionIdx + 1).trim();
-      component_name = comment.slice(0, versionIdx).trim();
+      const candidate = comment.slice(versionIdx + 1).trim();
+      // Only treat as version if it's short and starts with a digit or 'v'
+      if (candidate.length <= 20 && /^[v\d]/.test(candidate)) {
+        version = candidate;
+        component_name = comment.slice(0, versionIdx).trim();
+      }
     }
 
     const subIdx = component_name.indexOf("->");
@@ -89,4 +96,31 @@ export function buildParsedLog(
     eetLogPath: eetLogPath || null,
     bgeeLogPath: bgeeLogPath || null,
   };
+}
+
+/**
+ * Filter raw WeiDU.log text, removing lines whose mod_name:component
+ * key is in the excluded set. Returns the filtered raw text.
+ */
+export function filterLogText(raw: string, excluded: Set<string>): string {
+  if (excluded.size === 0) return raw;
+  return raw
+    .split("\n")
+    .filter((line) => {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith("//")) return true; // Keep comments/blanks
+      const match = trimmed.match(/^~([^~]+)~\s+#(\d+)\s+#(\d+)/);
+      if (!match) return true; // Keep unrecognized lines
+      const fullPath = match[1];
+      const component = match[3];
+      const pathParts = fullPath.replace(/\\/g, "/").split("/");
+      const tp_file = pathParts[pathParts.length - 1];
+      const mod_name = tp_file
+        .replace(/\.tp2$/i, "")
+        .replace(/^setup-/i, "")
+        .toLowerCase();
+      const key = `${mod_name}:${component}`;
+      return !excluded.has(key);
+    })
+    .join("\n");
 }

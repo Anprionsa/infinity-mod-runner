@@ -1,21 +1,28 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from "react";
-import { invoke } from "@tauri-apps/api/core";
+// import { invoke } from "@tauri-apps/api/core"; // No longer needed — using typed wrappers
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { AppConfig, ParsedLog } from "../App";
+import { DEFAULT_FORGE_URL } from "../App";
+import type { AppConfig, ParsedLog, InstallStatusMap } from "../App";
 import { guiLog } from "../lib/gui-logger";
 import {
-  readInstallStatus,
-  readErrorLog,
   readFileContents,
-  requestPause,
-  requestResume,
-  countWeiduLogEntries,
+  startNativeInstall,
+  startDryRun,
+  installDecision,
+  installPause,
+  installResume,
+  installSendInput,
+  abortNativeInstall,
+  writeTempLog,
   saveInstallReport,
-  type InstallStatus,
+  type NativeInstallArgs,
   type ErrorLogEntry,
 } from "../lib/tauri-bridge";
 import { buildReport, type InstallReport } from "../lib/install-report";
+import { fetchModIndex } from "../lib/forge-data";
 import { shareReportOnGitHub } from "../lib/telemetry";
+import { filterLogText } from "../lib/log-parser";
+import { useI18n } from "../lib/i18n";
 
 interface Props {
   config: AppConfig;
@@ -24,6 +31,10 @@ interface Props {
   onRunningChange: (running: boolean) => void;
   onSaveConfig: (config: AppConfig) => void;
   weiduVersion?: string | null;
+  excludedComponents?: Set<string>;
+  pausePoints?: { afterModIndex: number; message: string; phase: string }[];
+  backupExists?: boolean;
+  onInstallStatus?: (status: InstallStatusMap) => void;
 }
 
 interface LogLine {
@@ -186,7 +197,13 @@ export default function InstallRunner({
   onRunningChange,
   onSaveConfig,
   weiduVersion,
+  excludedComponents,
+  pausePoints: pausePointsProp,
+  backupExists,
+  onInstallStatus,
 }: Props) {
+  const { t } = useI18n();
+  const [showBackupWarning, setShowBackupWarning] = useState(false);
   const updateOption = (key: string, value: boolean | number) => {
     onSaveConfig({ ...config, [key]: value });
   };
@@ -204,24 +221,53 @@ export default function InstallRunner({
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
   const flushTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // File-based monitoring — track both phases separately
-  const [bg1Status, setBg1Status] = useState<InstallStatus | null>(null);
-  const [bg2Status, setBg2Status] = useState<InstallStatus | null>(null);
+  // Mod display name lookup (tp2 name → Forge display name)
+  const modDisplayNames = useRef<Map<string, string>>(new Map());
 
-  // Stdout-based progress counter — independent of install_status.json.
-  const stdoutCompleted = useRef(0);
-  const [stdoutCount, setStdoutCount] = useState(0);
-  const stdoutCurrentMod = useRef<string>("");
-  const [stdoutMod, setStdoutMod] = useState<string>("");
+  // Live install status per component — key is "mod_name:component"
+  const installStatusRef = useRef<InstallStatusMap>(new Map());
 
-  // WeiDU.log-based progress — the ground truth. Counts ~ lines in the game's weidu.log.
-  const [weiduLogCount, setWeiduLogCount] = useState(0);
+  // Fetch mod index for display names on mount
+  useEffect(() => {
+    const baseUrl = config.forge_data_url || DEFAULT_FORGE_URL;
+    fetchModIndex(baseUrl).then(index => {
+      const arr = Array.isArray(index) ? index : Object.values(index);
+      const map = new Map<string, string>();
+      for (const entry of arr) {
+        const tp2 = ((entry.t || "") as string).toLowerCase();
+        const name = (entry.n || "") as string;
+        if (tp2 && name) map.set(tp2, name);
+        // Also map coWF aliases
+        const coWF = ((entry as Record<string, unknown>).coWF || []) as (string | null)[];
+        for (const wf of coWF) {
+          if (wf && !map.has(wf.toLowerCase())) map.set(wf.toLowerCase(), name);
+        }
+      }
+      modDisplayNames.current = map;
+    }).catch(() => {}); // Non-critical
+  }, [config.forge_data_url]);
+
+  // Event-based progress (native installer — no file polling)
+  const [currentMod, setCurrentMod] = useState<string>(""); // Display name (or tp2 fallback)
+  const [currentModTp2, setCurrentModTp2] = useState<string>(""); // Always the tp2 name
+  const [currentComponent, setCurrentComponent] = useState<string>("");
+  const [progressCurrent, setProgressCurrent] = useState(0);
+  const [progressTotal, setProgressTotal] = useState(0);
+  const [_successCount, setSuccessCount] = useState(0); // Used by progress events
+  const [warnCount, setWarnCount] = useState(0);
+  const [errCount, setErrCount] = useState(0);
+  const [skipCount, setSkipCount] = useState(0);
+  const [currentPhase, setCurrentPhase] = useState<"bgee" | "eet" | "starting" | "done">("starting");
+
+  // Error recovery dialog (Retry/Skip/Stop)
+  const [batchError, setBatchError] = useState<{ modName: string; error: string; canRetry: boolean } | null>(null);
+
   const [errorEntries, setErrorEntries] = useState<ErrorLogEntry[]>([]);
-  const errorEntriesRef = useRef<ErrorLogEntry[]>([]); // Mutable accumulator
-  const lastSeenLine = useRef(0);
+  const errorEntriesRef = useRef<ErrorLogEntry[]>([]);
 
   // Process state
   const [exitCode, setExitCode] = useState<number | null>(null);
+  const [wasAborted, setWasAborted] = useState(false);
   const [inputNeeded, setInputNeeded] = useState<string | null>(null);
   const [inputValue, setInputValue] = useState("");
   const [startError, setStartError] = useState<string | null>(null);
@@ -244,6 +290,7 @@ export default function InstallRunner({
   const logContainerRef = useRef<HTMLDivElement>(null);
   const errorTimelineRef = useRef<HTMLDivElement>(null);
   const [logStickToBottom, setLogStickToBottom] = useState(true);
+  const [logSearch, setLogSearch] = useState("");
 
   // Sync display when log is expanded (show current buffer contents immediately)
   useEffect(() => {
@@ -274,44 +321,7 @@ export default function InstallRunner({
     }
   }, [errorEntries]);
 
-  // ETA calculation — runs whenever status or stdout count changes
-  useEffect(() => {
-    if (!running) return;
-    const statusCombined = (bg1Status?.current ?? 0) + (bg2Status?.current ?? 0);
-    // Use whichever counter is higher — stdout is the fallback
-    const combined = Math.max(statusCombined, stdoutCount);
-    const combinedTotal = (bg1Status?.total ?? 0) + (bg2Status?.total ?? 0);
-    if (combinedTotal === 0) return;
-
-    const now = Date.now();
-    throughputSamples.current.push({ t: now, n: combined });
-
-    // Keep last 5 minutes of samples
-    const WINDOW_MS = 5 * 60 * 1000;
-    throughputSamples.current = throughputSamples.current.filter(
-      (s) => now - s.t < WINDOW_MS,
-    );
-
-    // Need at least 2 samples spread over 30+ seconds for a meaningful rate
-    const samples = throughputSamples.current;
-    if (samples.length >= 2) {
-      const oldest = samples[0];
-      const elapsedSec = (now - oldest.t) / 1000;
-      const componentsDone = combined - oldest.n;
-
-      if (elapsedSec >= 30 && componentsDone > 0) {
-        const rate = componentsDone / elapsedSec;
-        const remaining = combinedTotal - combined;
-        const etaSec = remaining / rate;
-
-        if (etaSec > 0 && etaSec < 86400) {
-          setEta(formatElapsed(etaSec * 1000));
-        } else {
-          setEta(null);
-        }
-      }
-    }
-  }, [bg1Status, bg2Status, running, stdoutCount, weiduLogCount]);
+  // Old ETA effect removed — new one uses progressCurrent (see above)
 
   // Elapsed time counter
   useEffect(() => {
@@ -324,151 +334,36 @@ export default function InstallRunner({
 
   // Poll install_status.json and install_errors.log from BOTH game dirs
   // (BGEE phase writes to bg1 dir, EET phase writes to bg2 dir)
-  const lastSeenErrorLineBg1 = useRef(0);
   const errorFlushTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Batch error entry updates — accumulate in ref, flush to state periodically
-  const appendErrors = useCallback((newEntries: ErrorLogEntry[]) => {
-    if (newEntries.length === 0) return;
-    errorEntriesRef.current.push(...newEntries);
-    if (!errorFlushTimer.current) {
-      errorFlushTimer.current = setTimeout(() => {
-        errorFlushTimer.current = null;
-        setErrorEntries([...errorEntriesRef.current]);
-      }, 500);
-    }
-  }, []);
+  // Error entry batching removed — native installer emits errors via events
 
-  // Polling via recursive setTimeout — each poll schedules the next AFTER completing.
-  // Cannot silently die like setInterval with async callbacks.
-  const pollCount = useRef(0);
-  const lastLoggedCurrent = useRef(-1);
-  const pollActive = useRef(false);
-  const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // No polling needed — native installer emits events directly.
+  // ETA is calculated from install:progress events.
 
+  // ETA calculation driven by progressCurrent changes
   useEffect(() => {
-    if (!running) {
-      pollActive.current = false;
-      return;
-    }
-
-    const bg1Dir = config.bg1_game_dir;
-    const bg2Dir = config.bg2_game_dir;
-
-    if (!bg1Dir && !bg2Dir) {
-      guiLog.warn("POLL", "No game directories configured for polling");
-      return;
-    }
-
-    guiLog.info("POLL", `Starting recursive polling: bg1=${bg1Dir || "none"}, bg2=${bg2Dir || "none"}`);
-    pollActive.current = true;
-    pollCount.current = 0;
-
-    async function poll() {
-      if (!pollActive.current) return;
-      pollCount.current++;
-
-      try {
-        let bg1s: InstallStatus | null = null;
-        let bg2s: InstallStatus | null = null;
-
-        if (bg1Dir) {
-          try {
-            bg1s = await readInstallStatus(bg1Dir);
-            if (bg1s) setBg1Status(bg1s);
-          } catch (e) {
-            // Log first 5, then every 100th failure
-            if (pollCount.current <= 5 || pollCount.current % 100 === 0) {
-              guiLog.warn("POLL", `BG1 read failed (poll ${pollCount.current}): ${e}`);
-            }
-          }
-        }
-        if (bg2Dir) {
-          try {
-            bg2s = await readInstallStatus(bg2Dir);
-            if (bg2s) {
-              setBg2Status(bg2s);
-              // Log every BG2 read for first 20 polls, then every 50th, to diagnose stale reads
-              if (pollCount.current <= 20 || pollCount.current % 50 === 0) {
-                guiLog.debug("POLL", `BG2 raw: current=${bg2s.current} total=${bg2s.total} mod=${bg2s.mod} updated=${bg2s.last_updated}`);
-              }
-            } else if (pollCount.current <= 20 || pollCount.current % 50 === 0) {
-              guiLog.debug("POLL", `BG2 returned null (poll ${pollCount.current})`);
-            }
-          } catch (e) {
-            if (pollCount.current <= 10 || pollCount.current % 50 === 0) {
-              guiLog.warn("POLL", `BG2 read failed (poll ${pollCount.current}): ${e}`);
-            }
-          }
-        }
-
-        // Log progress changes
-        const combined = (bg1s?.current ?? 0) + (bg2s?.current ?? 0);
-        if (combined !== lastLoggedCurrent.current) {
-          const total = (bg1s?.total ?? 0) + (bg2s?.total ?? 0);
-          const mod = bg2s?.mod || bg1s?.mod || "?";
-          guiLog.debug("POLL", `Progress: ${combined}/${total} mod=${mod}`);
-          lastLoggedCurrent.current = combined;
-        }
-
-        // Heartbeat every 100 polls
-        if (pollCount.current % 100 === 0) {
-          guiLog.debug("POLL", `Heartbeat: poll #${pollCount.current}, combined=${combined}`);
-        }
-
-        // Detect paused state
-        setIsPaused((bg2s?.status === "paused") || (bg1s?.status === "paused"));
-
-        // Read errors
-        if (bg2Dir) {
-          try {
-            const result = await readErrorLog(bg2Dir, lastSeenLine.current);
-            if (result.entries.length > 0) appendErrors(result.entries);
-            lastSeenLine.current = result.total_lines;
-          } catch {}
-        }
-        if (bg1Dir) {
-          try {
-            const result = await readErrorLog(bg1Dir, lastSeenErrorLineBg1.current);
-            if (result.entries.length > 0) appendErrors(result.entries);
-            lastSeenErrorLineBg1.current = result.total_lines;
-          } catch {}
-        }
-        // Count weidu.log entries every 5th poll (ground truth progress)
-        if (pollCount.current % 5 === 0) {
-          let totalWeiduEntries = 0;
-          if (bg1Dir) {
-            try { totalWeiduEntries += await countWeiduLogEntries(bg1Dir); } catch {}
-          }
-          if (bg2Dir) {
-            try { totalWeiduEntries += await countWeiduLogEntries(bg2Dir); } catch {}
-          }
-          if (totalWeiduEntries > 0) {
-            setWeiduLogCount(totalWeiduEntries);
-          }
-        }
-      } catch (e) {
-        guiLog.error("POLL", `Poll ${pollCount.current} crashed: ${e}`);
-      }
-
-      // Schedule next poll — this is the key: always schedules, even after errors
-      if (pollActive.current) {
-        pollTimerRef.current = setTimeout(poll, 500);
+    if (!running || progressTotal === 0) return;
+    const now = Date.now();
+    throughputSamples.current.push({ t: now, n: progressCurrent });
+    const WINDOW_MS = 5 * 60 * 1000;
+    throughputSamples.current = throughputSamples.current.filter((s) => now - s.t < WINDOW_MS);
+    if (throughputSamples.current.length >= 2) {
+      const oldest = throughputSamples.current[0];
+      const elapsedSec = (now - oldest.t) / 1000;
+      const done = progressCurrent - oldest.n;
+      if (elapsedSec >= 30 && done > 0) {
+        const rate = done / elapsedSec;
+        const remaining = progressTotal - progressCurrent;
+        const etaSec = remaining / rate;
+        if (etaSec > 0 && etaSec < 86400) setEta(formatElapsed(etaSec * 1000));
+        else setEta(null);
       }
     }
+  }, [progressCurrent, progressTotal, running]);
 
-    // Start the first poll
-    pollTimerRef.current = setTimeout(poll, 500);
-
-    return () => {
-      guiLog.info("POLL", `Polling stopped after ${pollCount.current} polls`);
-      pollActive.current = false;
-      if (pollTimerRef.current) {
-        clearTimeout(pollTimerRef.current);
-        pollTimerRef.current = null;
-      }
-    };
-  }, [running, config.bg2_game_dir, config.bg1_game_dir, appendErrors]);
+  // No polling — native installer uses direct Tauri events
 
   const addLine = useCallback(
     (text: string, type: LogLine["type"] = "stdout") => {
@@ -514,23 +409,18 @@ export default function InstallRunner({
     return () => {
       if (flushTimer.current) clearTimeout(flushTimer.current);
       if (errorFlushTimer.current) clearTimeout(errorFlushTimer.current);
-      if (pollTimerRef.current) clearTimeout(pollTimerRef.current);
-      pollActive.current = false;
       unlistenRefs.current.forEach((fn) => fn());
       unlistenRefs.current.length = 0;
     };
   }, []);
 
   const startInstall = useCallback(async () => {
-    // Guard against double-click
     if (running) return;
     setStartError(null);
     setPauseRequested(false);
     setIsPaused(false);
-    // Clean up any stale pause file from previous run
-    if (config.bg2_game_dir) requestResume(config.bg2_game_dir).catch(() => {});
-    if (!config.mod_installer_path) {
-      addLine("[ERROR] mod_installer path not configured — set it in Setup tab", "system");
+    if (!config.weidu_path) {
+      addLine("[ERROR] WeiDU path not configured — set it in Setup tab", "system");
       setLogExpanded(true);
       return;
     }
@@ -547,26 +437,23 @@ export default function InstallRunner({
     setDisplayLines([]);
     setTotalLineCount(0);
     setExitCode(null);
-    setBg1Status(null);
-    setBg2Status(null);
+    setProgressCurrent(0);
+    setProgressTotal(parsedLog.componentCount);
+    setSuccessCount(0);
+    setWarnCount(0);
+    setErrCount(0);
+    setSkipCount(0);
+    setCurrentMod("");
+    setCurrentModTp2("");
+    setCurrentComponent("");
+    setCurrentPhase("starting");
+    installStatusRef.current = new Map();
+    if (onInstallStatus) onInstallStatus(new Map());
+    setBatchError(null);
     setErrorEntries([]);
     errorEntriesRef.current = [];
-    logBuffer.current = [];
-    logTotalCount.current = 0;
-    pendingLines.current = [];
-    setDisplayLines([]);
-    setTotalLineCount(0);
-    lastSeenLine.current = 0;
-    lastSeenErrorLineBg1.current = 0;
-    seenStdoutIssues.current.clear();
-    consecutiveTimeouts.current = 0;
-    setMassTimeoutWarning(false);
-    stdoutCompleted.current = 0;
-    setStdoutCount(0);
-    setWeiduLogCount(0);
-    stdoutCurrentMod.current = "";
-    setStdoutMod("");
     setAbortPending(false);
+    setWasAborted(false);
     if (errorFlushTimer.current) { clearTimeout(errorFlushTimer.current); errorFlushTimer.current = null; }
     setLogExpanded(false);
     setLogStickToBottom(true);
@@ -576,88 +463,182 @@ export default function InstallRunner({
     setElapsed(0);
     onRunningChange(true);
 
-    addLine("[EET Mod Runner] Starting installation...", "system");
-    guiLog.info("INSTALL", `Starting install: ${config.mod_installer_path}`);
+    addLine("[EET Mod Runner] Starting native install (direct WeiDU)...", "system");
+    guiLog.info("INSTALL", `Starting native install (${parsedLog?.componentCount || "?"} components, WeiDU: ${weiduVersion || "?"})`);
 
-    const args: string[] = ["eet"];
-    if (config.bg1_game_dir) args.push("--bg1-game-directory", config.bg1_game_dir);
-    if (config.bg2_game_dir) args.push("--bg2-game-directory", config.bg2_game_dir);
-    if (config.mod_directory) args.push("--mod-directories", config.mod_directory);
-    if (config.weidu_path) args.push("--weidu-binary", config.weidu_path);
-    if (parsedLog?.eetLogPath) args.push("--bg2-log-file", parsedLog.eetLogPath);
-    if (parsedLog?.bgeeLogPath) args.push("--bg1-log-file", parsedLog.bgeeLogPath);
-    // Install options — essential
-    args.push("--skip-installed", config.skip_installed ? "true" : "false");
-    args.push("--timeout", String(config.timeout));
-    // Always disable mod_installer's download — the Download tab handles all downloads
-    args.push("--download", "false");
-    if (config.abort_on_warnings) args.push("--abort-on-warnings");
-    if (config.never_abort) args.push("--never-abort");
-    if (config.overwrite) args.push("--overwrite");
-    args.push("--check-last-installed", config.check_last_installed ? "true" : "false");
-    // Install options — advanced
-    if (config.language && config.language !== "en_US") args.push("--language", config.language);
-    if (config.depth !== 5) args.push("--depth", String(config.depth));
-    if (config.strict_matching) args.push("--strict-matching");
-    if (config.tick !== 500) args.push("--tick", String(config.tick));
-    if (config.lookback !== 10) args.push("--lookback", String(config.lookback));
-    if (config.weidu_log_mode && config.weidu_log_mode !== "autolog,logapp,log-extern") {
-      args.push("--weidu-log-mode", config.weidu_log_mode);
+    // Build log paths (filter if components excluded)
+    let eetLogFile = parsedLog.eetLogPath || null;
+    let bgeeLogFile = parsedLog.bgeeLogPath || null;
+    if (excludedComponents && excludedComponents.size > 0) {
+      try {
+        if (parsedLog.raw) {
+          const filtered = filterLogText(parsedLog.raw, excludedComponents);
+          eetLogFile = await writeTempLog(filtered, "WeiDU-filtered.log");
+          addLine(`[EET Mod Runner] Filtered EET log (${excludedComponents.size} components excluded)`, "system");
+        }
+        if (parsedLog.bgeeRaw) {
+          const filtered = filterLogText(parsedLog.bgeeRaw, excludedComponents);
+          bgeeLogFile = await writeTempLog(filtered, "WeiDU-BGEE-filtered.log");
+        }
+      } catch (e) {
+        addLine(`[EET Mod Runner] Filter failed: ${e}. Using original logs.`, "system");
+      }
     }
-    if (config.casefold) args.push("--casefold");
-    if (config.generic_weidu_args) args.push("--generic-weidu-args", config.generic_weidu_args);
 
-    addLine(`[EET Mod Runner] Command: ${config.mod_installer_path} ${args.join(" ")}`, "system");
+    if (!eetLogFile) {
+      addLine("[ERROR] No EET log path available", "system");
+      onRunningChange(false);
+      return;
+    }
 
     try {
-      // Set up event listeners for stdout/stderr/exit from Rust backend
-      const unlistenStdout = await listen<string>("install-stdout", (event) => {
-        try {
-          addLine(event.payload, "stdout");
-          detectInput(event.payload);
-          detectStdoutIssue(event.payload);
-        } catch (err) {
-          console.error("Error processing stdout:", err);
-        }
+      // Set up event listeners for native install events
+      const unlistenStdout = await listen<string>("install:stdout", (event) => {
+        addLine(event.payload, "stdout");
       });
-      const unlistenStderr = await listen<string>("install-stderr", (event) => {
+      const unlistenStderr = await listen<string>("install:stderr", (event) => {
         addLine(event.payload, "stderr");
       });
-      const unlistenExit = await listen<number>("install-exit", (event) => {
-        const code = event.payload;
-        setExitCode(code);
+      const unlistenProgress = await listen<{
+        current: number; total: number; success: number;
+        warnings: number; errors: number; skipped: number; elapsed_ms: number;
+      }>("install:progress", (event) => {
+        const p = event.payload;
+        setProgressCurrent(p.current);
+        setProgressTotal(p.total);
+        setSuccessCount(p.success);
+        setWarnCount(p.warnings);
+        setErrCount(p.errors);
+        setSkipCount(p.skipped);
+      });
+      const unlistenBatchStart = await listen<{
+        batch_idx: number; total_batches: number; mod_name: string; components: string[];
+      }>("install:batch_start", (event) => {
+        const tp2Name = event.payload.mod_name;
+        const displayName = modDisplayNames.current.get(tp2Name.toLowerCase()) || tp2Name;
+        setCurrentMod(displayName);
+        setCurrentModTp2(tp2Name);
+        const batchNum = event.payload.batch_idx + 1;
+        const totalBatches = event.payload.total_batches;
+        setCurrentComponent(`Batch ${batchNum}/${totalBatches}`);
+        if (batchNum === 1 || batchNum % 25 === 0) {
+          guiLog.info("INSTALL", `Batch ${batchNum}/${totalBatches}: ${displayName} (${tp2Name})`);
+        }
+      });
+      const unlistenBatchError = await listen<{
+        batch_idx: number; mod_name: string; error: string; can_retry: boolean;
+      }>("install:batch_error", (event) => {
+        guiLog.error("INSTALL", `Batch error: ${event.payload.mod_name} — ${event.payload.error}`);
+        setBatchError({
+          modName: event.payload.mod_name,
+          error: event.payload.error,
+          canRetry: event.payload.can_retry,
+        });
+      });
+      const unlistenBatchDone = await listen<{
+        batch_idx: number;
+        results: { mod_name: string; component: number; status: string; message?: string }[];
+      }>("install:batch_done", (event) => {
+        for (const r of event.payload.results) {
+          const key = `${r.mod_name}:${r.component}`;
+          const status = r.status === "Success" ? "success"
+            : r.status === "Warning" ? "warning"
+            : r.status === "Error" ? "error"
+            : r.status === "Skipped" ? "skipped"
+            : r.status === "AlreadyInstalled" ? "success"
+            : "success";
+          installStatusRef.current.set(key, status);
+        }
+        // Push updated map to parent
+        if (onInstallStatus) {
+          onInstallStatus(new Map(installStatusRef.current));
+        }
+      });
+      const unlistenPause = await listen<{ message: string }>("install:pause", (event) => {
+        setIsPaused(true);
+        addLine(`[EET Mod Runner] PAUSE: ${event.payload.message || "Pause point reached"}`, "system");
+      });
+      const unlistenPhase = await listen<string>("install:phase", (event) => {
+        setCurrentPhase(event.payload as "bgee" | "eet");
+        addLine(`[EET Mod Runner] Phase: ${event.payload}`, "system");
+      });
+      const unlistenInputNeeded = await listen<{ prompt: string }>("install:input_needed", (event) => {
+        setInputNeeded(event.payload.prompt);
+      });
+      const unlistenError = await listen<string>("install:error", (event) => {
+        addLine(`[EET Mod Runner] ERROR: ${event.payload}`, "system");
+        guiLog.error("INSTALL", event.payload);
+      });
+      const unlistenComplete = await listen<{
+        total_components: number; success: number; warnings: number;
+        errors: number; skipped: number; elapsed_ms: number; aborted: boolean;
+      }>("install:complete", (event) => {
+        const s = event.payload;
+        setExitCode(s.aborted ? 1 : s.errors > 0 ? 1 : 0);
+        setWasAborted(s.aborted);
+        setCurrentPhase("done");
+        setBatchError(null);     // Clear any lingering error dialog
+        setAbortPending(false);  // Clear abort banner
+        setInputNeeded(null);    // Clear any input prompt
         onRunningChange(false);
-        addLine(`[EET Mod Runner] Process exited with code ${code}`, "system");
-        guiLog.info("INSTALL", `Process exited with code ${code}`);
-        // Final poll from both dirs
-        if (config.bg1_game_dir) {
-          readInstallStatus(config.bg1_game_dir).then((s) => {
-            if (s) setBg1Status(s);
-          }).catch(() => {});
-          readErrorLog(config.bg1_game_dir, lastSeenErrorLineBg1.current).then((result) => {
-            if (result.entries.length > 0) appendErrors(result.entries);
-          }).catch(() => {});
-        }
-        if (config.bg2_game_dir) {
-          readInstallStatus(config.bg2_game_dir).then((s) => {
-            if (s) setBg2Status(s);
-          }).catch(() => {});
-          readErrorLog(config.bg2_game_dir, lastSeenLine.current).then((result) => {
-            if (result.entries.length > 0) appendErrors(result.entries);
-          }).catch(() => {});
-        }
-        // Cleanup listeners
-        unlistenStdout();
-        unlistenStderr();
-        unlistenExit();
+        addLine(`[EET Mod Runner] Install complete: ${s.success} success, ${s.warnings} warnings, ${s.errors} errors, ${s.skipped} skipped`, "system");
+        const durMs = s.elapsed_ms || (Date.now() - (startTime || Date.now()));
+        const durStr = durMs > 3600000 ? `${(durMs/3600000).toFixed(1)}h` : durMs > 60000 ? `${Math.round(durMs/60000)}m` : `${Math.round(durMs/1000)}s`;
+        guiLog.info("INSTALL", `Complete in ${durStr}: ${s.success} ok, ${s.errors} err, ${s.warnings} warn, ${s.skipped} skip${s.aborted ? " (ABORTED)" : ""} — ${s.success}/${s.total_components} total`);
+        // OS notification
+        try {
+          if (Notification.permission === "granted") {
+            new Notification("EET Mod Runner — Install Complete", {
+              body: s.aborted
+                ? "Installation was aborted."
+                : `${s.success} success, ${s.errors} errors, ${s.warnings} warnings`,
+            });
+          } else if (Notification.permission !== "denied") {
+            Notification.requestPermission().then((perm) => {
+              if (perm === "granted") {
+                new Notification("EET Mod Runner — Install Complete", {
+                  body: `${s.success} success, ${s.errors} errors`,
+                });
+              }
+            });
+          }
+        } catch { /* Notification API not available */ }
+        // Cleanup all listeners
+        unlistenStdout(); unlistenStderr(); unlistenProgress();
+        unlistenBatchStart(); unlistenBatchError(); unlistenBatchDone(); unlistenPause();
+        unlistenPhase(); unlistenInputNeeded(); unlistenError(); unlistenComplete();
       });
-      unlistenRefs.current = [unlistenStdout, unlistenStderr, unlistenExit];
 
-      // Spawn via Rust backend
-      await invoke("start_install", {
-        modInstallerPath: config.mod_installer_path,
-        args,
-      });
+      unlistenRefs.current = [
+        unlistenStdout, unlistenStderr, unlistenProgress,
+        unlistenBatchStart, unlistenBatchError, unlistenBatchDone, unlistenPause,
+        unlistenPhase, unlistenInputNeeded, unlistenError, unlistenComplete,
+      ];
+
+      // Launch native install
+      const installArgs: NativeInstallArgs = {
+        weiduPath: config.weidu_path!,
+        bg2GameDir: config.bg2_game_dir!,
+        bg1GameDir: config.bg1_game_dir || null,
+        modDirectory: config.mod_directory!,
+        eetLogPath: eetLogFile,
+        bgeeLogPath: bgeeLogFile,
+        language: config.language || "en_US",
+        languageIndex: 0,
+        skipInstalled: config.skip_installed,
+        timeout: config.timeout,
+        neverAbort: config.never_abort,
+        abortOnWarnings: config.abort_on_warnings,
+        weiduLogMode: config.weidu_log_mode || "autolog,logapp,log-extern",
+        maxBatchSize: 25,
+        pausePoints: pausePointsProp || [],
+        bcsScanner: config.bcs_scanner,
+        autoSkipAfterRetry: config.auto_skip_after_retry,
+        suppressReadmes: config.suppress_readmes,
+        dataDirectory: config.data_directory,
+      };
+
+      await startNativeInstall(installArgs);
     } catch (e) {
       const errMsg = String(e);
       addLine(`[EET Mod Runner] Failed to start: ${errMsg}`, "system");
@@ -665,110 +646,62 @@ export default function InstallRunner({
       setStartError(errMsg);
       setLogExpanded(true);
       onRunningChange(false);
-      // Clean up listeners that were set up before the invoke failed
       unlistenRefs.current.forEach((fn) => fn());
       unlistenRefs.current.length = 0;
     }
-  }, [config, parsedLog, running, onRunningChange, addLine]);
+  }, [config, parsedLog, running, onRunningChange, addLine, excludedComponents]);
 
-  // Accumulate recent lines to build question context
-  const recentLines = useRef<string[]>([]);
+  const runDryRun = useCallback(async () => {
+    if (running) return;
+    setLogExpanded(true);
+    addLine("[EET Mod Runner] Starting dry run...", "system");
+    try {
+      const eetLogFile = config.eet_log_path;
+      const bgeeLogFile = config.bgee_log_path || null;
+      if (!eetLogFile || !config.weidu_path) return;
 
-  function detectInput(line: string) {
-    recentLines.current.push(line);
-    // Keep last 15 lines for context
-    if (recentLines.current.length > 15) recentLines.current.shift();
+      // Set up listeners for dry run output (same stdout stream as real install)
+      const unlistenStdout = await listen<string>("install:stdout", (event) => {
+        addLine(event.payload, "stdout");
+      });
+      const unlistenDryRunComplete = await listen<unknown>("install:dry_run_complete", (_event) => {
+        addLine("[EET Mod Runner] Dry run report received", "system");
+        // Clean up listeners
+        unlistenStdout();
+        unlistenDryRunComplete();
+      });
 
-    // mod_installer signals: "[INFO] User Input required" or "[INFO] Question is"
-    const modInstallerInput = /User Input required|Question is/i.test(line);
-
-    // WeiDU patterns: [Y]es or [N]o, Choose, Select, Enter the full path, etc.
-    const weiduPatterns = [
-      /\[Y\]es\s+or\s+\[N\]o/i,
-      /\bchoose\b.*:/i,
-      /\bselect\b.*:/i,
-      /\benter the full path\b/i,
-      /\bdo you want\b/i,
-      /\bwould you like\b/i,
-      /\?\s*$/,
-    ];
-    const weiduInput = weiduPatterns.some((p) => p.test(line));
-
-    if (modInstallerInput || weiduInput) {
-      // Show the last few lines as context for the question
-      const context = recentLines.current.slice(-5).join("\n");
-      setInputNeeded(context);
+      const installArgs = {
+        weiduPath: config.weidu_path,
+        bg2GameDir: config.bg2_game_dir!,
+        bg1GameDir: config.bg1_game_dir || null,
+        modDirectory: config.mod_directory!,
+        eetLogPath: eetLogFile,
+        bgeeLogPath: bgeeLogFile,
+        language: config.language || "en_US",
+        languageIndex: 0,
+        skipInstalled: config.skip_installed,
+        timeout: config.timeout,
+        neverAbort: true,
+        abortOnWarnings: false,
+        weiduLogMode: config.weidu_log_mode || "autolog,logapp,log-extern",
+        maxBatchSize: 25,
+        pausePoints: [] as { afterModIndex: number; message: string; phase: string }[],
+        bcsScanner: false,
+        autoSkipAfterRetry: false,
+      };
+      await startDryRun(installArgs);
+    } catch (e) {
+      addLine(`[EET Mod Runner] Dry run failed: ${String(e)}`, "system");
     }
-  }
+  }, [config, running, addLine]);
 
-  // Track which messages we've already surfaced to avoid duplicates
-  const seenStdoutIssues = useRef(new Set<string>());
-  // Track consecutive timeouts to detect infrastructure failures
-  const consecutiveTimeouts = useRef(0);
-  const [massTimeoutWarning, setMassTimeoutWarning] = useState(false);
-
-  function detectStdoutIssue(line: string) {
-    // Track current mod from WeiDU output (e.g. "Installing [Component Name]" or mod_installer's "Installing: modname")
-    const installMatch = line.match(/Installing\s*(?:\[([^\]]+)\]|:\s*(\S+))/i);
-    if (installMatch) {
-      stdoutCurrentMod.current = installMatch[1] || installMatch[2] || "";
-      setStdoutMod(stdoutCurrentMod.current);
-    }
-
-    // Count completed components from WeiDU stdout — the independent progress counter
-    if (/SUCCESSFULLY INSTALLED/i.test(line) || /INSTALLED WITH WARNINGS/i.test(line)) {
-      stdoutCompleted.current++;
-      setStdoutCount(stdoutCompleted.current);
-      consecutiveTimeouts.current = 0;
-      if (massTimeoutWarning) setMassTimeoutWarning(false);
-    }
-
-    // Detect mass timeouts — every component failing means infrastructure problem
-    if (/timed?\s*out/i.test(line)) {
-      consecutiveTimeouts.current++;
-      if (consecutiveTimeouts.current >= 5 && !massTimeoutWarning) {
-        setMassTimeoutWarning(true);
-        guiLog.error("INSTALL", `Mass timeout detected: ${consecutiveTimeouts.current} consecutive timeouts`);
-      }
-    }
-
-    // Count errors/skips as processed components too (they advance the install)
-    if (/NOT INSTALLED DUE TO ERRORS/i.test(line) || /SKIPPING\b/i.test(line)) {
-      stdoutCompleted.current++;
-      setStdoutCount(stdoutCompleted.current);
-    }
-
-    // WeiDU prints these patterns for install results
-    const patterns: { regex: RegExp; level: string }[] = [
-      { regex: /INSTALLED WITH WARNINGS\s+(.+)/i, level: "WARN" },
-      { regex: /NOT INSTALLED DUE TO ERRORS\s+(.+)/i, level: "ERROR" },
-      { regex: /ERROR Installing \[(.+?)\]/i, level: "ERROR" },
-      { regex: /ERROR Re-Installing \[(.+?)\]/i, level: "ERROR" },
-    ];
-
-    for (const { regex, level } of patterns) {
-      const match = line.match(regex);
-      if (match) {
-        const key = `${level}:${match[1]}`;
-        if (seenStdoutIssues.current.has(key)) return;
-        seenStdoutIssues.current.add(key);
-
-        const now = new Date().toISOString();
-        appendErrors([{
-          timestamp: now,
-          level,
-          mod_name: "",
-          message: match[1].trim(),
-        }]);
-        return;
-      }
-    }
-  }
+  // Input detection and stdout issue tracking now handled by native installer engine
 
   async function sendInput() {
     if (inputValue) {
       try {
-        await invoke("send_install_input", { text: inputValue });
+        await installSendInput(inputValue);
         addLine(`[User Input] ${inputValue}`, "system");
         setInputValue("");
         setInputNeeded(null);
@@ -781,14 +714,12 @@ export default function InstallRunner({
   const [abortPending, setAbortPending] = useState(false);
 
   async function abortInstall() {
-    if (abortPending) return; // Already aborting
+    if (abortPending) return;
     setAbortPending(true);
     try {
-      await invoke("abort_install");
-      addLine("[EET Mod Runner] Abort signal sent — waiting for current component to finish (up to 10s before force kill)...", "system");
+      await abortNativeInstall();
+      addLine("[EET Mod Runner] Abort signal sent — WeiDU will be stopped after current operation...", "system");
       guiLog.warn("INSTALL", "Installation aborted by user");
-      // Don't immediately set running=false — wait for the install-exit event
-      // The abort is graceful, so it may take a few seconds
     } catch (e) {
       addLine(`[EET Mod Runner] Failed to abort: ${e}`, "system");
       setAbortPending(false);
@@ -796,28 +727,24 @@ export default function InstallRunner({
   }
 
   async function togglePause() {
-    const gameDir = config.bg2_game_dir;
-    if (!gameDir) return;
-
-    if (pauseRequested) {
+    if (isPaused || pauseRequested) {
       // Resume
       try {
-        await requestResume(gameDir);
+        await installResume();
+        setIsPaused(false);
         setPauseRequested(false);
-        addLine("[EET Mod Runner] Resume requested — will continue after current pause.", "system");
-        guiLog.info("INSTALL", "Resume requested");
+        addLine("[EET Mod Runner] Resumed.", "system");
       } catch (e) {
         addLine(`[EET Mod Runner] Failed to resume: ${e}`, "system");
       }
     } else {
-      // Pause
+      // Pause at next batch boundary
       try {
-        await requestPause(gameDir);
+        await installPause();
         setPauseRequested(true);
         addLine("[EET Mod Runner] Pause requested — will pause after current mod finishes.", "system");
-        guiLog.info("INSTALL", "Pause requested");
       } catch (e) {
-        addLine(`[EET Mod Runner] Failed to request pause: ${e}`, "system");
+        addLine(`[EET Mod Runner] Failed to pause: ${e}`, "system");
       }
     }
   }
@@ -842,12 +769,12 @@ export default function InstallRunner({
     if (!parsedLog || exitCode === null) return;
     setReportState("generating");
     try {
-      const forgeBaseUrl = config.forge_data_url || "https://anprionsa.github.io/eet-mod-forge";
+      const forgeBaseUrl = config.forge_data_url || DEFAULT_FORGE_URL;
       const report = await buildReport({
         parsedLog,
         errorEntries,
-        bg1Status,
-        bg2Status,
+        bg1Status: null,
+        bg2Status: null,
         exitCode,
         elapsedMs: elapsed,
         weiduVersion: weiduVersion || "unknown",
@@ -858,7 +785,8 @@ export default function InstallRunner({
       // Save to game dir
       const json = JSON.stringify(report, null, 2);
       const filename = `install-report-${report.timestamp.substring(0, 10)}-${report.id.substring(0, 8)}.json`;
-      const dir = config.bg2_game_dir?.replace(/\\/g, "/") || ".";
+      const dir = config.bg2_game_dir?.replace(/\\/g, "/");
+      if (!dir) throw new Error("BG2 game directory not configured");
       await saveInstallReport(json, `${dir}/${filename}`);
 
       guiLog.info("INSTALL", `Install report saved: ${filename} (${report.components.length} components)`);
@@ -867,58 +795,23 @@ export default function InstallRunner({
       guiLog.error("INSTALL", `Failed to generate report: ${e}`);
       setReportState("error");
     }
-  }, [parsedLog, exitCode, errorEntries, bg1Status, bg2Status, elapsed, weiduVersion, config]);
+  }, [parsedLog, exitCode, errorEntries, elapsed, weiduVersion, config]);
 
-  // Combine both phases for display
-  // Active status = whichever was updated most recently
-  const activeStatus = (() => {
-    if (!bg1Status && !bg2Status) return null;
-    if (!bg1Status) return bg2Status;
-    if (!bg2Status) return bg1Status;
-    return bg2Status.last_updated >= bg1Status.last_updated ? bg2Status : bg1Status;
-  })();
-
-  // Combined progress = highest of three sources:
-  // 1. install_status.json (bg1 + bg2 current fields)
-  // 2. stdout counter (SUCCESSFULLY INSTALLED lines)
-  // 3. weidu.log entry count (ground truth — WeiDU writes after each component)
-  const statusCurrent = (bg1Status?.current ?? 0) + (bg2Status?.current ?? 0);
-  const combinedCurrent = Math.max(statusCurrent, stdoutCount, weiduLogCount);
-  const combinedTotal = (bg1Status?.total ?? 0) + (bg2Status?.total ?? 0);
-  // If install_status.json has no total yet, use the imported log component count as estimate
-  const effectiveTotal = combinedTotal > 0 ? combinedTotal : (parsedLog?.componentCount ?? 0);
-  const statusStale = running && stdoutCount > statusCurrent + 5;
-
-  // Detect long-running single component (counter stuck but install alive)
-  const lastUpdatedStr = activeStatus?.last_updated || "";
-  const lastUpdatedTime = lastUpdatedStr ? new Date(lastUpdatedStr).getTime() : 0;
-  const statusAlive = running && lastUpdatedTime > 0 && (Date.now() - lastUpdatedTime < 120_000);
-  const counterStuck = running && combinedCurrent > 0 && totalLineCount > 1000 && statusAlive;
-
+  // Progress from native install events — simple, no polling needed
+  const combinedCurrent = progressCurrent;
+  const effectiveTotal = progressTotal > 0 ? progressTotal : (parsedLog?.componentCount ?? 0);
   const pct = effectiveTotal > 0
     ? Math.min(99, Math.round((combinedCurrent / effectiveTotal) * 100))
     : 0;
 
-  // Use install_status.json as source of truth for counts (avoids double-counting with errorEntries).
-  // Fall back to errorEntries count only if no status files exist yet.
-  const hasStatusData = bg1Status !== null || bg2Status !== null;
-  const errorCount = hasStatusData
-    ? (bg1Status?.errors ?? 0) + (bg2Status?.errors ?? 0)
-    : errorEntries.filter((e) => e.level === "ERROR").length;
-  const warnCount = hasStatusData
-    ? (bg1Status?.warnings ?? 0) + (bg2Status?.warnings ?? 0)
-    : errorEntries.filter((e) => e.level === "WARN").length;
-  const skipCount = hasStatusData
-    ? (bg1Status?.skipped ?? 0) + (bg2Status?.skipped ?? 0)
-    : errorEntries.filter((e) => e.level === "SKIP").length;
+  const errorCount = errCount;
   const isComplete = exitCode !== null && !running;
 
-  // Determine which phase is active
-  const currentPhase: "bg1" | "eet" | "done" | "starting" = (() => {
+  const activePhase: "bg1" | "eet" | "done" | "starting" = (() => {
     if (isComplete) return "done";
-    if (!activeStatus) return "starting";
-    if (activeStatus === bg1Status && bg1Status?.status !== "complete") return "bg1";
-    return "eet";
+    if (currentPhase === "bgee") return "bg1";
+    if (currentPhase === "eet") return "eet";
+    return "starting";
   })();
 
   // Memoize expensive computations — only recalculate when errorEntries changes
@@ -948,66 +841,51 @@ export default function InstallRunner({
   if (!running && !isComplete) {
     return (
       <div>
-        <h2>Install Runner</h2>
+        <h2>{t("install.heading", "Install Runner")}</h2>
         <p style={{ color: "var(--txd)", marginBottom: 20, fontSize: 13 }}>
-          Execute mod_installer with your imported configuration. Real-time
-          progress and error monitoring powered by install_status.json.
+          {t("install.desc", "Execute your mod installation directly via WeiDU. Real-time progress streaming, per-batch error recovery, and pause points.")}
         </p>
 
-        {!config.mod_installer_path && (
+        {!config.weidu_path && (
           <div className="msg err">
-            mod_installer path not configured. Set it in the Setup tab.
+            {t("install.no_weidu", "WeiDU path not configured. Set it in the Setup tab.")}
           </div>
         )}
         {!parsedLog && (
           <div className="msg warn">
-            No log imported. Import a WeiDU.log first.
+            {t("install.no_log", "No log imported. Import a WeiDU.log first.")}
           </div>
         )}
 
-        <h3>Install Options</h3>
+        <h3>{t("install.options", "Install Options")}</h3>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 12 }}>
-          <ToggleOption checked={config.skip_installed} onChange={(v) => updateOption("skip_installed", v)} label="Skip already installed" hint="Resume interrupted installs" />
-          <ToggleOption checked={config.never_abort} onChange={(v) => updateOption("never_abort", v)} label="Never abort (continue past errors)" hint="Recommended for large installs" />
-          <ToggleOption checked={config.download_mods} onChange={(v) => updateOption("download_mods", v)} label="Download missing mods" hint="Auto-download from GitHub" />
-          <ToggleOption checked={config.overwrite} onChange={(v) => updateOption("overwrite", v)} label="Overwrite mod folders" hint="Force re-copy even if present" />
-          <ToggleOption checked={config.abort_on_warnings} onChange={(v) => updateOption("abort_on_warnings", v)} label="Abort on warnings" hint="Stop if WeiDU warns" />
-          <ToggleOption checked={config.check_last_installed} onChange={(v) => updateOption("check_last_installed", v)} label="Verify post-install" hint="Check component in weidu.log after" />
-          <NumericOption value={config.timeout} onChange={(v) => updateOption("timeout", v)} label="Timeout" suffix={`sec (${Math.round(config.timeout / 60)}m)`} />
+          <ToggleOption checked={config.skip_installed} onChange={(v) => updateOption("skip_installed", v)} label={t("install.skip_installed", "Skip already installed")} hint="Resume interrupted installs" />
+          <ToggleOption checked={config.never_abort} onChange={(v) => updateOption("never_abort", v)} label={t("install.never_abort", "Never abort (continue past errors)")} hint="Recommended for large installs" />
+          <ToggleOption checked={config.abort_on_warnings} onChange={(v) => updateOption("abort_on_warnings", v)} label={t("install.abort_warnings", "Abort on warnings")} hint="Stop if WeiDU warns" />
+          <ToggleOption checked={config.bcs_scanner} onChange={(v) => updateOption("bcs_scanner", v)} label="BCS corruption scanner" hint="Detect & restore WeiDU round-trip corruption" />
+          <ToggleOption checked={config.auto_skip_after_retry} onChange={(v) => updateOption("auto_skip_after_retry", v)} label="Auto-skip after retry" hint="Auto retry+skip errors (no prompts)" />
+          <ToggleOption checked={config.suppress_readmes} onChange={(v) => updateOption("suppress_readmes", v)} label="Suppress readme popups" hint="Prevent mods from opening docs during install" />
+          <NumericOption value={config.timeout} onChange={(v) => updateOption("timeout", v)} label="Timeout per mod" suffix={`sec (${Math.round(config.timeout / 60)}m)`} />
         </div>
 
-        {/* Advanced options — collapsible */}
-        <div
-          className="log-toggle"
-          onClick={() => setAdvancedOpen(!advancedOpen)}
-          style={{ marginBottom: advancedOpen ? 8 : 16 }}
-        >
+        {/* Advanced options */}
+        <div className="log-toggle" onClick={() => setAdvancedOpen(!advancedOpen)}
+          style={{ marginBottom: advancedOpen ? 8 : 16 }}>
           <span>
             <span className="toggle-arrow">{advancedOpen ? "\u25BC" : "\u25B6"}</span>
-            {" "}Advanced Options
+            {" "}{t("install.advanced", "Advanced Options")}
           </span>
         </div>
         {advancedOpen && (
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 16, padding: "0 4px" }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: "var(--tx)" }}>
-              <span style={{ minWidth: 70 }}>Language:</span>
+              <span style={{ minWidth: 70 }}>{t("install.language", "Language:")}</span>
               <input type="text" value={config.language} onChange={(e) => onSaveConfig({ ...config, language: e.target.value })}
                 style={{ width: 80, background: "var(--bg2)", border: "1px solid var(--brd)", color: "var(--tx)", padding: "4px 8px", borderRadius: 4, fontSize: 13 }} />
             </div>
-            <NumericOption value={config.depth} onChange={(v) => updateOption("depth", v)} label="Search depth" />
-            <ToggleOption checked={config.strict_matching} onChange={(v) => updateOption("strict_matching", v)} label="Strict matching" hint="Match version + sub-component exactly" />
-            <ToggleOption checked={config.casefold} onChange={(v) => updateOption("casefold", v)} label="Casefold (Linux ext4)" hint="Enable ext4 case-insensitive matching" />
-            <NumericOption value={config.tick} onChange={(v) => updateOption("tick", v)} label="Poll interval" suffix="ms" />
-            <NumericOption value={config.lookback} onChange={(v) => updateOption("lookback", v)} label="Lookback" suffix="lines" />
-            <div style={{ gridColumn: "1 / -1", display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: "var(--tx)" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: "var(--tx)" }}>
               <span style={{ minWidth: 110 }}>WeiDU log mode:</span>
               <input type="text" value={config.weidu_log_mode} onChange={(e) => onSaveConfig({ ...config, weidu_log_mode: e.target.value })}
-                style={{ flex: 1, background: "var(--bg2)", border: "1px solid var(--brd)", color: "var(--tx)", padding: "4px 8px", borderRadius: 4, fontSize: 13 }} />
-            </div>
-            <div style={{ gridColumn: "1 / -1", display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: "var(--tx)" }}>
-              <span style={{ minWidth: 110 }}>Extra WeiDU args:</span>
-              <input type="text" value={config.generic_weidu_args} onChange={(e) => onSaveConfig({ ...config, generic_weidu_args: e.target.value })}
-                placeholder="e.g. --safe-exit,--noautoupdate"
                 style={{ flex: 1, background: "var(--bg2)", border: "1px solid var(--brd)", color: "var(--tx)", padding: "4px 8px", borderRadius: 4, fontSize: 13 }} />
             </div>
           </div>
@@ -1015,19 +893,88 @@ export default function InstallRunner({
 
         {startError && (
           <div className="msg err" style={{ marginBottom: 12 }}>
-            <div style={{ fontWeight: 600, marginBottom: 4 }}>Failed to start installation</div>
+            <div style={{ fontWeight: 600, marginBottom: 4 }}>{t("install.start_error", "Failed to start installation")}</div>
             <div style={{ fontSize: 12, wordBreak: "break-all" }}>{startError}</div>
           </div>
         )}
 
-        <button
-          className="btn btn-primary"
-          onClick={startInstall}
-          disabled={!config.mod_installer_path || !parsedLog}
-          style={{ marginBottom: 16 }}
-        >
-          Start Installation
-        </button>
+        <div style={{ display: "flex", gap: 10, marginBottom: 16 }}>
+          <button
+            className="btn btn-primary"
+            onClick={() => {
+              if (!backupExists) { setShowBackupWarning(true); return; }
+              startInstall();
+            }}
+            disabled={!config.weidu_path || !parsedLog}
+          >
+            {t("install.start", "Start Installation")}
+          </button>
+          <button
+            className="btn"
+            onClick={runDryRun}
+            disabled={!config.weidu_path || !parsedLog || running}
+            style={{ opacity: 0.8 }}
+          >
+            {t("install.dry_run", "Dry Run")}
+          </button>
+        </div>
+
+        {/* Dry run output log */}
+        {displayLines.length > 0 && !running && (
+          <div style={{ marginBottom: 16 }}>
+            <div className="log-toggle" style={{ marginBottom: logExpanded ? 8 : 0, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <span onClick={() => setLogExpanded(!logExpanded)} style={{ cursor: "pointer" }}>
+                <span className="toggle-arrow">{logExpanded ? "\u25BC" : "\u25B6"}</span>
+                {" "}Dry Run Output ({displayLines.length} lines)
+              </span>
+              {logExpanded && (
+                <button
+                  className="btn"
+                  style={{ fontSize: 11, padding: "2px 10px", opacity: 0.7 }}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    const text = displayLines.map(l => l.text).join("\n");
+                    navigator.clipboard.writeText(text);
+                  }}
+                >
+                  Copy
+                </button>
+              )}
+            </div>
+            {logExpanded && (
+              <div style={{ background: "var(--bg1)", border: "1px solid var(--brd)", borderRadius: 6, padding: 8, maxHeight: 400, overflow: "auto", fontFamily: "monospace", fontSize: 12 }}>
+                {displayLines.map((line, i) => (
+                  <div key={i} style={{ color: line.type === "system" ? "var(--gold)" : line.type === "stderr" ? "#f87171" : "var(--tx)", whiteSpace: "pre-wrap", lineHeight: 1.4 }}>
+                    {line.text}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Backup warning dialog */}
+        {showBackupWarning && (
+          <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.7)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000 }}>
+            <div style={{ background: "#1a1a2e", border: "1px solid #555", borderRadius: 8, padding: 24, maxWidth: 480, textAlign: "center" }}>
+              <div style={{ fontSize: 16, fontWeight: 600, color: "var(--gold)", marginBottom: 12 }}>{t("install.no_backup_title", "No Backup Found")}</div>
+              <div style={{ fontSize: 13, color: "#ccc", marginBottom: 16, lineHeight: 1.5 }}>
+                It's recommended to create a backup before a multi-hour install.
+                You can create one from the Ready Check tab, or continue without one.
+              </div>
+              <div style={{ display: "flex", gap: 12, justifyContent: "center" }}>
+                <button className="btn" onClick={() => { setShowBackupWarning(false); startInstall(); }}
+                  style={{ padding: "6px 20px" }}>
+                  {t("install.continue_anyway", "Continue Anyway")}
+                </button>
+                <button className="btn" onClick={() => setShowBackupWarning(false)}
+                  style={{ padding: "6px 20px", background: "var(--bg3)" }}>
+                  {t("btn.cancel", "Cancel")}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     );
   }
@@ -1035,63 +982,59 @@ export default function InstallRunner({
   // ─── Active install / post-install view ───
   return (
     <div>
-      <h2>Install Runner</h2>
+      <h2>{t("install.heading", "Install Runner")}</h2>
+
+      {/* ── Phase Banner ── */}
+      {activePhase !== "done" && activePhase !== "starting" && (
+        <div style={{
+          textAlign: "center", padding: "5px 0", marginBottom: 8, borderRadius: 6,
+          fontSize: 11, fontWeight: 700, letterSpacing: 1.5, textTransform: "uppercase",
+          background: activePhase === "bg1"
+            ? "linear-gradient(90deg, transparent, rgba(0,200,255,0.12), transparent)"
+            : "linear-gradient(90deg, transparent, rgba(255,180,40,0.12), transparent)",
+          color: activePhase === "bg1" ? "var(--cyn)" : "var(--gold)",
+          borderTop: `1px solid ${activePhase === "bg1" ? "rgba(0,200,255,0.3)" : "rgba(255,180,40,0.3)"}`,
+          borderBottom: `1px solid ${activePhase === "bg1" ? "rgba(0,200,255,0.3)" : "rgba(255,180,40,0.3)"}`,
+        }}>
+          {activePhase === "bg1" ? "PRE-EET" : "EET"}
+        </div>
+      )}
 
       {/* ── Status Dashboard ── */}
       <div className="install-dashboard">
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
           <div>
-            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <div>
               <div className="current-mod">
-                {isPaused ? "Paused"
-                  : (activeStatus?.mod || stdoutMod)
-                    ? (statusStale ? stdoutMod || activeStatus?.mod : activeStatus?.mod || stdoutMod)
-                    : isComplete ? "Installation complete"
-                      : pauseRequested ? "Pausing after current mod..."
-                        : combinedCurrent > 0 ? "Installing..."
-                          : "Starting..."}
+                {isPaused ? t("install.paused", "Paused")
+                  : currentMod
+                    ? currentMod
+                    : isComplete ? t("install.complete", "Installation complete")
+                      : pauseRequested ? t("install.pausing", "Pausing after current mod...")
+                        : combinedCurrent > 0 ? t("install.installing", "Installing...")
+                          : t("install.starting", "Starting...")}
               </div>
-              {currentPhase !== "done" && currentPhase !== "starting" && (
-                <span style={{
-                  fontSize: 10, fontWeight: 600, padding: "2px 8px", borderRadius: 10,
-                  background: currentPhase === "bg1" ? "var(--bg-info)" : "var(--bg3)",
-                  color: currentPhase === "bg1" ? "var(--cyn)" : "var(--gold)",
-                  border: `1px solid ${currentPhase === "bg1" ? "var(--cyn)" : "var(--goldd)"}`,
-                }}>
-                  {currentPhase === "bg1" ? "BG1:EE Phase" : "EET Phase"}
-                </span>
-              )}
+              <div className="current-component">
+                {currentModTp2 && currentMod !== currentModTp2
+                  ? `${currentModTp2} \u2014 ${currentComponent || ""}`
+                  : currentComponent
+                    || (combinedCurrent > 0 ? `${combinedCurrent} of ${effectiveTotal} components processed`
+                      : t("install.waiting", "Waiting for first mod..."))}
+              </div>
             </div>
-            <div className="current-component">
-              {activeStatus?.component
-                || (combinedCurrent > 0 ? `${combinedCurrent} of ${effectiveTotal} components processed`
-                  : "Waiting for first mod...")}
-              {statusStale && (
-                <span style={{ color: "var(--org)", fontSize: 10, marginLeft: 8 }}>
-                  (progress via stdout — status file stale)
-                </span>
-              )}
-            </div>
-            {/* Activity indicator — shows install is alive during long components */}
+            {/* Activity indicator */}
             {running && !isComplete && (
               <div style={{ fontSize: 11, color: "var(--txd)", marginTop: 4, display: "flex", alignItems: "center", gap: 6 }}>
-                {statusAlive && (
-                  <span style={{
-                    width: 6, height: 6, borderRadius: "50%", background: "var(--grn)",
-                    display: "inline-block", animation: "pulse 2s ease-in-out infinite",
-                  }} />
-                )}
+                <span style={{
+                  width: 6, height: 6, borderRadius: "50%", background: "var(--grn)",
+                  display: "inline-block", animation: "pulse 2s ease-in-out infinite",
+                }} />
                 {totalLineCount > 0 && (
                   <span>{totalLineCount >= 1000 ? `${(totalLineCount / 1000).toFixed(0)}K` : totalLineCount} log lines</span>
                 )}
-                {statusAlive && lastUpdatedStr && (
-                  <span>· last status update {Math.round((Date.now() - lastUpdatedTime) / 1000)}s ago</span>
-                )}
-                {counterStuck && (
-                  <span style={{ color: "var(--cyn)" }}>· large component in progress</span>
-                )}
               </div>
             )}
+            {/* Batch error dialog moved below stats row */}
           </div>
           <div style={{ display: "flex", gap: 8 }}>
             {running && (
@@ -1104,10 +1047,10 @@ export default function InstallRunner({
                     color: isPaused ? "var(--grn)" : pauseRequested ? "var(--org)" : "var(--tx)",
                   }}
                 >
-                  {isPaused ? "Resume" : pauseRequested ? "Pausing..." : "Pause"}
+                  {isPaused ? t("install.resume_btn", "Resume") : pauseRequested ? t("install.pausing", "Pausing...") : t("install.pause_btn", "Pause")}
                 </button>
                 <button className="btn btn-danger" onClick={abortInstall} disabled={abortPending}>
-                  {abortPending ? "Aborting..." : "Abort"}
+                  {abortPending ? t("install.aborting", "Aborting...") : t("install.abort_btn", "Abort")}
                 </button>
               </>
             )}
@@ -1126,7 +1069,7 @@ export default function InstallRunner({
         )}
         {abortPending && (
           <div className="msg err" style={{ marginTop: 8, fontSize: 12 }}>
-            Abort signal sent — waiting for WeiDU to finish its current operation (force kill in 10s if unresponsive)...
+            Abort signal sent — WeiDU will be force-killed in 3s if unresponsive...
           </div>
         )}
 
@@ -1136,7 +1079,7 @@ export default function InstallRunner({
               {combinedCurrent}
             </span>
             <span style={{ color: "var(--txd)" }}>
-              / {combinedTotal || parsedLog?.componentCount || "?"} components
+              / {effectiveTotal || "?"} components
             </span>
           </div>
           <div className="stat">
@@ -1170,24 +1113,53 @@ export default function InstallRunner({
         </div>
       </div>
 
+      {/* ── Batch Error Recovery ── */}
+      {batchError && (
+        <div style={{
+          display: "flex", alignItems: "center", justifyContent: "space-between",
+          padding: "10px 14px", marginTop: 8, borderRadius: 6,
+          background: "rgba(255,50,50,0.08)", border: "1px solid rgba(255,50,50,0.3)",
+        }}>
+          <div style={{ fontSize: 12 }}>
+            <div style={{ fontWeight: 600, color: "var(--red)" }}>
+              {t("install.batch_failed", "Batch failed:")} {batchError.modName}
+            </div>
+            <div style={{ color: "var(--txd)", marginTop: 2 }}>{batchError.error}</div>
+          </div>
+          <div style={{ display: "flex", gap: 8, flexShrink: 0, marginLeft: 16 }}>
+            {batchError.canRetry && (
+              <button className="btn" onClick={() => { guiLog.info("INSTALL", `Decision: RETRY ${batchError.modName}`); installDecision("retry"); setBatchError(null); }}>
+                {t("btn.retry", "Retry")}
+              </button>
+            )}
+            <button className="btn" onClick={() => { guiLog.info("INSTALL", `Decision: SKIP ${batchError.modName}`); installDecision("skip"); setBatchError(null); }}>
+              {t("btn.skip", "Skip")}
+            </button>
+            <button className="btn btn-danger" onClick={() => { guiLog.info("INSTALL", `Decision: STOP at ${batchError.modName}`); installDecision("stop"); setBatchError(null); }}>
+              {t("install.stop_install", "Stop Install")}
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* ── Post-Install Summary ── */}
       {isComplete && (
         <div className={`install-summary`}>
           <div
             className="summary-title"
-            style={{ color: exitCode === 0 ? "var(--grn)" : "var(--red)" }}
+            style={{ color: wasAborted ? "var(--gold)" : exitCode === 0 ? "var(--grn)" : "var(--red)" }}
           >
-            {exitCode === 0 ? "Installation Complete" : `Installation Finished (exit code ${exitCode})`}
+            {wasAborted ? t("install.title_aborted", "Installation Aborted") : exitCode === 0 ? t("install.title_complete", "Installation Complete") : t("install.title_errors", "Installation Finished with Errors")}
           </div>
           <div className="summary-time">
-            Total time: {formatElapsed(elapsed)}
+            {t("install.total_time", "Total time:")} {formatElapsed(elapsed)}
           </div>
           <div className="summary-grid" style={{ margin: "12px 0" }}>
             <div className="summary-card">
               <div className="number" style={{ color: "var(--grn)" }}>
                 {Math.max(0, combinedCurrent - errorCount - skipCount)}
               </div>
-              <div className="label">Installed</div>
+              <div className="label">{t("install.card_installed", "Installed")}</div>
               {warnCount > 0 && (
                 <div style={{ fontSize: 10, color: "var(--org)", marginTop: 4 }}>
                   {warnCount} with warnings
@@ -1198,13 +1170,14 @@ export default function InstallRunner({
               <div className="number" style={{ color: errorCount > 0 ? "var(--red)" : "var(--txd)" }}>
                 {errorCount}
               </div>
-              <div className="label">Errors</div>
+              <div className="label">{t("install.card_errors", "Errors")}</div>
               {errorCount > 0 && (
                 <div style={{ fontSize: 10, color: "var(--txd)", marginTop: 4 }}>
                   {totalCrashes > 0 && <div><span style={{ color: "var(--pur)" }}>{totalCrashes}</span> crashes</div>}
                   {totalFailures > 0 && <div><span style={{ color: "var(--red)" }}>{totalFailures}</span> failures</div>}
                   {totalUnknownErrors > 0 && <div><span style={{ color: "var(--org)" }}>{totalUnknownErrors}</span> unknown</div>}
-                  <div style={{ marginTop: 2 }}>{uniqueErrorMods} mods affected</div>
+                  {uniqueErrorMods > 0 && <div style={{ marginTop: 2 }}>{uniqueErrorMods} mods affected</div>}
+                  {wasAborted && uniqueErrorMods === 0 && <div style={{ marginTop: 2 }}>from aborted batches</div>}
                 </div>
               )}
             </div>
@@ -1212,28 +1185,28 @@ export default function InstallRunner({
               <div className="number" style={{ color: "var(--txd)" }}>
                 {skipCount}
               </div>
-              <div className="label">Skipped</div>
+              <div className="label">{t("install.card_skipped", "Skipped")}</div>
               {suspiciousSkips > 0 && (
                 <div style={{ fontSize: 10, color: "var(--org)", marginTop: 4 }}>
                   {suspiciousSkips} suspicious
                 </div>
               )}
             </div>
-            {combinedTotal > combinedCurrent && (
+            {effectiveTotal > combinedCurrent && (
               <div className="summary-card">
                 <div className="number" style={{ color: "var(--txd)" }}>
-                  {combinedTotal - combinedCurrent}
+                  {effectiveTotal - combinedCurrent}
                 </div>
-                <div className="label">Unattempted</div>
+                <div className="label">{t("install.card_unattempted", "Unattempted")}</div>
                 <div style={{ fontSize: 10, color: "var(--txd)", marginTop: 4 }}>
-                  mod not found or skipped entirely
+                  {wasAborted ? "install was aborted" : "mod not found or skipped entirely"}
                 </div>
               </div>
             )}
           </div>
           <div style={{ display: "flex", gap: 8, justifyContent: "center", flexWrap: "wrap" }}>
             <button className="btn" onClick={copyErrorReport}>
-              Copy Error Report
+              {t("install.copy_error", "Copy Error Report")}
             </button>
             <button
               className="btn"
@@ -1241,23 +1214,36 @@ export default function InstallRunner({
               disabled={reportState === "generating"}
             >
               {reportState === "generating" ? "Generating..." :
-               reportState === "done" ? "Report Saved" :
-               reportState === "error" ? "Report Failed" :
-               "Save Install Report"}
+               reportState === "done" ? t("install.report_saved", "Report Saved") :
+               reportState === "error" ? t("install.report_failed", "Report Failed") :
+               t("install.save_report", "Save Install Report")}
             </button>
             {lastReport && config.telemetry_opt_in === true && (
               <button
                 className="btn"
-                onClick={() => shareReportOnGitHub(lastReport)}
-                title="Opens a pre-filled GitHub Issue — you review before submitting"
+                onClick={async () => {
+                  const ok = await shareReportOnGitHub(lastReport);
+                  if (ok) {
+                    guiLog.info("INSTALL", "Telemetry report copied to clipboard and GitHub opened");
+                  }
+                }}
+                title="Copies report to clipboard and opens GitHub — paste and submit to share"
               >
-                Share on GitHub
+                {t("install.share_report", "Share Report")}
               </button>
             )}
             <button className="btn btn-primary" onClick={() => {
               setExitCode(null);
-              setBg1Status(null);
-              setBg2Status(null);
+              setProgressCurrent(0);
+              setProgressTotal(0);
+              setSuccessCount(0);
+              setWarnCount(0);
+              setErrCount(0);
+              setSkipCount(0);
+              setCurrentMod("");
+              setCurrentComponent("");
+              setCurrentPhase("starting");
+              setBatchError(null);
               setErrorEntries([]);
               errorEntriesRef.current = [];
               logBuffer.current = [];
@@ -1265,11 +1251,6 @@ export default function InstallRunner({
               pendingLines.current = [];
               setDisplayLines([]);
               setTotalLineCount(0);
-              lastSeenLine.current = 0;
-              lastSeenErrorLineBg1.current = 0;
-              seenStdoutIssues.current.clear();
-    consecutiveTimeouts.current = 0;
-    setMassTimeoutWarning(false);
               if (errorFlushTimer.current) { clearTimeout(errorFlushTimer.current); errorFlushTimer.current = null; }
               setExpandedGroups(new Set());
               setInputNeeded(null);
@@ -1281,30 +1262,28 @@ export default function InstallRunner({
               setLastReport(null);
               setEta(null);
             }}>
-              New Install
+              {t("install.new_install", "New Install")}
             </button>
           </div>
           {/* Telemetry opt-in prompt — shown once after first report is generated */}
           {lastReport && config.telemetry_opt_in === null && (
             <div className="msg info" style={{ marginTop: 12, fontSize: 12 }}>
               <div style={{ fontWeight: 600, marginBottom: 4 }}>
-                Help improve mod compatibility data?
+                {t("install.telemetry_title", "Help improve mod compatibility data?")}
               </div>
               <div style={{ marginBottom: 8, color: "var(--txd)" }}>
-                Share anonymized install outcomes (mod IDs + pass/fail — no file paths or personal info)
-                with the EET community. Reports are submitted as GitHub Issues so you can see exactly
-                what's shared.
+                {t("install.telemetry_desc", "Share anonymized install outcomes (mod IDs + pass/fail \u2014 no file paths or personal info) with the EET community. Reports are submitted as GitHub Issues so you can see exactly what's shared.")}
               </div>
               <div style={{ display: "flex", gap: 8 }}>
                 <button className="btn btn-primary" style={{ fontSize: 11, padding: "3px 10px" }} onClick={() => {
                   onSaveConfig({ ...config, telemetry_opt_in: true });
                 }}>
-                  Enable
+                  {t("install.telemetry_enable", "Enable")}
                 </button>
                 <button className="btn" style={{ fontSize: 11, padding: "3px 10px" }} onClick={() => {
                   onSaveConfig({ ...config, telemetry_opt_in: false });
                 }}>
-                  No thanks
+                  {t("install.telemetry_decline", "No thanks")}
                 </button>
               </div>
             </div>
@@ -1312,29 +1291,7 @@ export default function InstallRunner({
         </div>
       )}
 
-      {/* ── Mass Timeout Warning ── */}
-      {massTimeoutWarning && running && (
-        <div className="msg err" style={{ marginBottom: 12, fontSize: 13 }}>
-          <div style={{ fontWeight: 600, marginBottom: 6 }}>
-            Multiple consecutive timeouts detected
-          </div>
-          <div style={{ marginBottom: 6 }}>
-            The first {consecutiveTimeouts.current} components all timed out. This usually means WeiDU
-            cannot find or execute the mod files. Common causes:
-          </div>
-          <ul style={{ margin: "0 0 8px 20px", fontSize: 12 }}>
-            <li><strong>Mods not extracted</strong> — downloaded .zip/.rar files must be unzipped into the mod directory, each in its own subfolder</li>
-            <li><strong>WeiDU blocked by antivirus</strong> — Windows Defender often quarantines weidu.exe. Add an exception.</li>
-            <li><strong>Wrong mod directory</strong> — check that your mod directory in Setup actually contains the extracted mod folders</li>
-            <li><strong>Timeout too short</strong> — if mods are on a slow drive, increase the timeout in Install Options</li>
-          </ul>
-          <div style={{ display: "flex", gap: 8 }}>
-            <button className="btn btn-danger" onClick={abortInstall} disabled={abortPending}>
-              {abortPending ? "Aborting..." : "Abort Install"}
-            </button>
-          </div>
-        </div>
-      )}
+      {/* Mass timeout warning removed — native installer handles timeouts per-batch */}
 
       {/* ── Input Panel ── */}
       {inputNeeded && running && (
@@ -1348,7 +1305,7 @@ export default function InstallRunner({
           }}
         >
           <div style={{ color: "var(--org)", fontSize: 12, fontWeight: 600, marginBottom: 8 }}>
-            Input Required
+            {t("install.input_required", "Input Required")}
           </div>
           <div style={{ color: "var(--tx)", fontSize: 12, marginBottom: 8 }}>
             {inputNeeded}
@@ -1365,7 +1322,7 @@ export default function InstallRunner({
                 color: "var(--tx)", padding: "6px 10px", borderRadius: 4, fontSize: 13,
               }}
             />
-            <button className="btn btn-primary" onClick={sendInput}>Send</button>
+            <button className="btn btn-primary" onClick={sendInput}>{t("btn.send", "Send")}</button>
           </div>
         </div>
       )}
@@ -1535,7 +1492,7 @@ export default function InstallRunner({
           <span className="toggle-arrow">
             {logExpanded ? "\u25BC" : "\u25B6"}
           </span>
-          {" "}Full Log ({totalLineCount.toLocaleString()} lines)
+          {" "}{t("install.full_log", "Full Log")} ({totalLineCount.toLocaleString()} lines)
         </span>
         <span style={{ fontSize: 11 }}>
           {logExpanded ? "Click to collapse" : "Click to expand"}
@@ -1544,6 +1501,14 @@ export default function InstallRunner({
 
       {logExpanded && (
         <div style={{ position: "relative" }}>
+          {/* Log search */}
+          <div style={{ marginBottom: 4 }}>
+            <input
+              type="text" placeholder={t("install.search_log", "Search log...")} value={logSearch}
+              onChange={(e) => setLogSearch(e.target.value)}
+              style={{ width: "100%", background: "var(--bg)", border: "1px solid var(--brd)", color: "var(--tx)", padding: "4px 8px", borderRadius: 3, fontSize: 11, outline: "none" }}
+            />
+          </div>
           <div
             ref={logContainerRef}
             className="log-output"
@@ -1552,15 +1517,15 @@ export default function InstallRunner({
               height: "350px",
               maxHeight: "80vh",
               overflow: "auto",
-              resize: "vertical", /* Native browser resize handle */
+              resize: "vertical",
             }}
           >
-            {totalLineCount > LOG_BUFFER_SIZE && (
+            {totalLineCount > LOG_BUFFER_SIZE && !logSearch && (
               <div style={{ color: "var(--txd)", fontSize: 11, padding: "4px 0", borderBottom: "1px solid var(--brd)", marginBottom: 4 }}>
                 ... {(totalLineCount - LOG_BUFFER_SIZE).toLocaleString()} earlier lines not shown
               </div>
             )}
-            {displayLines.map((line, i) => (
+            {(logSearch ? displayLines.filter((l) => l.text.toLowerCase().includes(logSearch.toLowerCase())) : displayLines).map((line, i) => (
               <div
                 key={i}
                 className={
@@ -1591,7 +1556,7 @@ export default function InstallRunner({
                 zIndex: 10,
               }}
             >
-              Jump to bottom
+              {t("install.jump_bottom", "Jump to bottom")}
             </button>
           )}
         </div>

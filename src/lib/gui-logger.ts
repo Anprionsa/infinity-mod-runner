@@ -22,12 +22,15 @@ type LogCategory =
   | "CONFIG"
   | "IMPORT"
   | "PREFLIGHT"
+  | "READYCHECK"
   | "INSTALL"
   | "DOWNLOAD"
   | "POLL"
   | "INVOKE"
   | "UI"
-  | "ERROR";
+  | "ERROR"
+  | "PRESET"
+  | "BACKUP";
 
 // Buffer entries in case Rust backend isn't ready yet
 const pendingEntries: { timestamp: string; level: LogLevel; category: LogCategory; message: string }[] = [];

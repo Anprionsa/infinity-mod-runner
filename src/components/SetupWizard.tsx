@@ -1,11 +1,11 @@
 import { useState, useEffect } from "react";
 import type { AppConfig } from "../App";
+import { useI18n } from "../lib/i18n";
 import {
   pickDirectory,
   pickFile,
   validateGameDir,
   detectWeidu,
-  detectModInstaller,
   getBinaryVersion,
   checkGameFreshness,
   scanModDirectory,
@@ -26,6 +26,7 @@ interface Props {
     weiduVersion: string | null;
     modInstallerVersion: string | null;
   };
+  installRunning?: boolean;
 }
 
 interface Validation {
@@ -33,7 +34,9 @@ interface Validation {
   bg1: boolean | null;
 }
 
-export default function SetupWizard({ config, onSave, configLoaded, preloaded }: Props) {
+export default function SetupWizard({ config, onSave, configLoaded, preloaded, installRunning }: Props) {
+  const { t } = useI18n();
+  const locked = !!installRunning;
   const [validation, setValidation] = useState<Validation>({
     bg2: preloaded?.bg2Valid ?? null,
     bg1: preloaded?.bg1Valid ?? null,
@@ -41,7 +44,7 @@ export default function SetupWizard({ config, onSave, configLoaded, preloaded }:
   const [autoDetecting, setAutoDetecting] = useState(false);
   const [weiduVersion, setWeiduVersion] = useState<string | null>(preloaded?.weiduVersion ?? null);
   const [modDirInfo, setModDirInfo] = useState<ModDirScan | null>(preloaded?.modDirScan ?? null);
-  const [modInstallerVersion, setModInstallerVersion] = useState<string | null>(preloaded?.modInstallerVersion ?? null);
+  // mod_installer removed — native installer calls WeiDU directly
   const [freshness, setFreshness] = useState<{
     bg1: GameFreshness | null;
     bg2: GameFreshness | null;
@@ -50,7 +53,7 @@ export default function SetupWizard({ config, onSave, configLoaded, preloaded }:
   // Auto-detect WeiDU and mod_installer on first load if not set
   useEffect(() => {
     if (!configLoaded) return;
-    if (!config.weidu_path || !config.mod_installer_path) {
+    if (!config.weidu_path) {
       handleAutoDetect();
     }
   }, [configLoaded]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -66,15 +69,7 @@ export default function SetupWizard({ config, onSave, configLoaded, preloaded }:
     }
   }, [config.weidu_path]);
 
-  useEffect(() => {
-    if (config.mod_installer_path) {
-      getBinaryVersion(config.mod_installer_path)
-        .then(setModInstallerVersion)
-        .catch(() => setModInstallerVersion(null));
-    } else {
-      setModInstallerVersion(null);
-    }
-  }, [config.mod_installer_path]);
+  // mod_installer version detection removed
 
   // Validate game dirs and check freshness when they change
   useEffect(() => {
@@ -119,16 +114,12 @@ export default function SetupWizard({ config, onSave, configLoaded, preloaded }:
   async function handleAutoDetect() {
     setAutoDetecting(true);
     try {
-      const [weidu, modInst] = await Promise.all([
-        config.weidu_path ? Promise.resolve(config.weidu_path) : detectWeidu(),
-        config.mod_installer_path
-          ? Promise.resolve(config.mod_installer_path)
-          : detectModInstaller(),
-      ]);
+      const weidu = config.weidu_path
+        ? config.weidu_path
+        : await detectWeidu();
       onSave({
         ...config,
         weidu_path: weidu || config.weidu_path,
-        mod_installer_path: modInst || config.mod_installer_path,
       });
     } finally {
       setAutoDetecting(false);
@@ -157,20 +148,40 @@ export default function SetupWizard({ config, onSave, configLoaded, preloaded }:
 
   function FreshnessInfo({ data }: { data: GameFreshness | null }) {
     if (!data) return null;
+    const fmt = (s: string, vars: Record<string, string | number>) =>
+      Object.entries(vars).reduce((acc, [k, v]) => acc.replace(`{${k}}`, String(v)), s);
     return (
       <div style={{ marginTop: 6 }}>
         {data.is_fresh ? (
           <div className="msg ok" style={{ fontSize: 11, padding: "6px 10px" }}>
-            Fresh install — dialog.tlk {data.dialog_tlk_mb} MB, override/ has {data.override_count} files
+            {fmt(
+              t("setup.fresh_install_detail",
+                "Fresh install — dialog.tlk {mb} MB, override/ has {count} files"),
+              { mb: data.dialog_tlk_mb, count: data.override_count })}
           </div>
         ) : (
           <div className="msg warn" style={{ fontSize: 11, padding: "6px 10px" }}>
-            <div style={{ fontWeight: 600, marginBottom: 2 }}>Modified game detected</div>
-            {data.warnings.map((w, i) => (
-              <div key={i}>{w}</div>
-            ))}
+            <div style={{ fontWeight: 600, marginBottom: 2 }}>{t("setup.modified_game", "Modified game detected")}</div>
+            {data.has_weidu_log && (
+              <div>{fmt(
+                t("setup.freshness.weidu_log_found",
+                  "weidu.log found with {count} mod entries — this game has been modded"),
+                { count: data.weidu_log_entries })}</div>
+            )}
+            {data.override_count >= 50 && (
+              <div>{fmt(
+                t("setup.freshness.override_count_high",
+                  "override/ contains {count} files (fresh installs have very few)"),
+                { count: data.override_count })}</div>
+            )}
+            {data.has_setup_scripts && (
+              <div>{t("setup.freshness.setup_scripts_found",
+                "Setup-*.exe files found — mod installers have been run here")}</div>
+            )}
             <div style={{ marginTop: 4, color: "var(--txd)" }}>
-              dialog.tlk {data.dialog_tlk_mb} MB | override/ {data.override_count} files
+              {fmt(
+                t("setup.modified_stats", "dialog.tlk {mb} MB | override/ {count} files"),
+                { mb: data.dialog_tlk_mb, count: data.override_count })}
             </div>
           </div>
         )}
@@ -184,16 +195,28 @@ export default function SetupWizard({ config, onSave, configLoaded, preloaded }:
 
   return (
     <div>
-      <h2>Setup</h2>
+      <h2>{t("setup.heading", "Setup")}</h2>
       <p style={{ color: "var(--txd)", marginBottom: 20, fontSize: 13 }}>
-        Configure your game directories and tool paths. These are saved
-        automatically.
+        {t("setup.desc", "Configure your game directories and tool paths. These are saved automatically.")}
       </p>
 
-      <h3>Game Directories</h3>
+      {locked && (
+        <div style={{
+          textAlign: "center", padding: "8px 0", marginBottom: 16, borderRadius: 6,
+          background: "linear-gradient(90deg, transparent, rgba(255,180,40,0.12), transparent)",
+          borderTop: "1px solid rgba(255,180,40,0.3)", borderBottom: "1px solid rgba(255,180,40,0.3)",
+          fontSize: 12, fontWeight: 600, color: "var(--gold)",
+        }}>
+          {t("setup.locked", "Settings are locked while an install is running")}
+        </div>
+      )}
+
+      <div style={locked ? { opacity: 0.5, pointerEvents: "none" } : undefined}>
+
+      <h3>{t("setup.game_dirs", "Game Directories")}</h3>
 
       <div className="field">
-        <label>BG1:EE Game Directory</label>
+        <label>{t("setup.bg1_label", "BG1:EE Game Directory")}</label>
         <div className="row">
           <input
             type="text"
@@ -207,22 +230,22 @@ export default function SetupWizard({ config, onSave, configLoaded, preloaded }:
               browse("bg1_game_dir", "dir", "Select BG1:EE Directory")
             }
           >
-            Browse
+            {t("btn.browse", "Browse")}
           </button>
         </div>
         {validation.bg1 === true && (
-          <div className="hint valid">chitin.key found</div>
+          <div className="hint valid">{t("setup.chitin_found", "chitin.key found")}</div>
         )}
         {validation.bg1 === false && (
           <div className="hint invalid">
-            chitin.key not found — is this the right directory?
+            {t("setup.chitin_not_found", "chitin.key not found — is this the right directory?")}
           </div>
         )}
         <FreshnessInfo data={freshness.bg1} />
       </div>
 
       <div className="field">
-        <label>BG2:EE Game Directory</label>
+        <label>{t("setup.bg2_label", "BG2:EE Game Directory")}</label>
         <div className="row">
           <input
             type="text"
@@ -236,22 +259,22 @@ export default function SetupWizard({ config, onSave, configLoaded, preloaded }:
               browse("bg2_game_dir", "dir", "Select BG2:EE Directory")
             }
           >
-            Browse
+            {t("btn.browse", "Browse")}
           </button>
         </div>
         {validation.bg2 === true && (
-          <div className="hint valid">chitin.key found</div>
+          <div className="hint valid">{t("setup.chitin_found", "chitin.key found")}</div>
         )}
         {validation.bg2 === false && (
           <div className="hint invalid">
-            chitin.key not found — is this the right directory?
+            {t("setup.chitin_not_found", "chitin.key not found — is this the right directory?")}
           </div>
         )}
         <FreshnessInfo data={freshness.bg2} />
       </div>
 
       <div className="field">
-        <label>Mod Directory</label>
+        <label>{t("setup.mod_dir_label", "Mod Directory")}</label>
         <div className="row">
           <input
             type="text"
@@ -265,34 +288,36 @@ export default function SetupWizard({ config, onSave, configLoaded, preloaded }:
               browse("mod_directory", "dir", "Select Mod Directory")
             }
           >
-            Browse
+            {t("btn.browse", "Browse")}
           </button>
         </div>
         <div className="hint">
-          Directory containing extracted mod folders (each with a .tp2 file)
+          {t("setup.mod_dir_hint", "Directory containing extracted mod folders (each with a .tp2 file)")}
         </div>
         {config.mod_directory && !modDirInfo && (
-          <div className="hint" style={{ color: "var(--txd)" }}>Scanning mod directory...</div>
+          <div className="hint" style={{ color: "var(--txd)" }}>{t("setup.mod_dir_scanning", "Scanning mod directory...")}</div>
         )}
         {modDirInfo && modDirInfo.mod_count > 0 && (
           <div className="hint valid">
-            {modDirInfo.mod_count} mod folders found ({modDirInfo.tp2_count} .tp2 files)
+            {t("setup.mod_dir_scan_result", "{count} mod folders found ({tp2} .tp2 files)")
+              .replace("{count}", String(modDirInfo.mod_count))
+              .replace("{tp2}", String(modDirInfo.tp2_count))}
           </div>
         )}
         {modDirInfo && modDirInfo.mod_count === 0 && modDirInfo.exists && (
           <div className="hint invalid">
-            No mods found. Mods must be extracted (unzipped) here, each in its own subfolder.
+            {t("setup.no_mods_found", "No mods found. Mods must be extracted (unzipped) here, each in its own subfolder.")}
           </div>
         )}
         {modDirInfo && !modDirInfo.exists && (
-          <div className="hint invalid">Directory does not exist</div>
+          <div className="hint invalid">{t("setup.mod_dir_not_exist", "Directory does not exist")}</div>
         )}
       </div>
 
-      <h3>Tool Paths</h3>
+      <h3>{t("setup.tool_paths", "Tool Paths")}</h3>
 
       <div className="field">
-        <label>WeiDU Binary</label>
+        <label>{t("setup.weidu_label", "WeiDU Binary")}</label>
         <div className="row">
           <input
             type="text"
@@ -304,14 +329,14 @@ export default function SetupWizard({ config, onSave, configLoaded, preloaded }:
             className="btn"
             onClick={() => browse("weidu_path", "file", "Select WeiDU Binary")}
           >
-            Browse
+            {t("btn.browse", "Browse")}
           </button>
           <button
             className="btn"
             onClick={handleAutoDetect}
             disabled={autoDetecting}
           >
-            {autoDetecting ? "Detecting..." : "Auto-Detect"}
+            {autoDetecting ? t("btn.detecting", "Detecting...") : t("btn.auto_detect", "Auto-Detect")}
           </button>
         </div>
         {config.weidu_path && (
@@ -320,46 +345,16 @@ export default function SetupWizard({ config, onSave, configLoaded, preloaded }:
           </div>
         )}
         {!config.weidu_path && (
-          <div className="hint">Not detected — browse to select manually</div>
+          <div className="hint">{t("setup.weidu_not_detected", "Not detected — browse to select manually")}</div>
         )}
       </div>
 
-      <div className="field">
-        <label>mod_installer Binary</label>
-        <div className="row">
-          <input
-            type="text"
-            value={config.mod_installer_path || ""}
-            onChange={(e) => update("mod_installer_path", e.target.value)}
-            placeholder="Auto-detected from PATH"
-          />
-          <button
-            className="btn"
-            onClick={() =>
-              browse(
-                "mod_installer_path",
-                "file",
-                "Select mod_installer Binary",
-              )
-            }
-          >
-            Browse
-          </button>
-        </div>
-        {config.mod_installer_path && (
-          <div className="hint valid">
-            {modInstallerVersion || "Found"}
-          </div>
-        )}
-        {!config.mod_installer_path && (
-          <div className="hint">Not detected — browse to select manually</div>
-        )}
-      </div>
+      {/* mod_installer removed — native installer calls WeiDU directly */}
 
-      <h3>Advanced</h3>
+      <h3>{t("setup.advanced", "Advanced")}</h3>
 
       <div className="field">
-        <label>Forge Data URL</label>
+        <label>{t("setup.forge_url_label", "Forge Data URL")}</label>
         <div className="row">
           <input
             type="text"
@@ -369,10 +364,31 @@ export default function SetupWizard({ config, onSave, configLoaded, preloaded }:
           />
         </div>
         <div className="hint">
-          URL where EET Mod Forge is hosted. Used for pre-flight checks and
-          debug matching.
+          {t("setup.forge_url_hint", "URL where EET Mod Forge is hosted. Used for pre-flight checks and debug matching.")}
         </div>
       </div>
+
+      <div className="field">
+        <label>{t("setup.data_dir_label", "Data Directory")}</label>
+        <div className="row">
+          <input
+            type="text"
+            value={config.data_directory || ""}
+            onChange={(e) => update("data_directory", e.target.value)}
+            placeholder="(default: next to exe)"
+          />
+          <button
+            className="btn"
+            onClick={() => browse("data_directory", "dir", "Select Data Directory")}
+          >
+            {t("btn.browse", "Browse")}
+          </button>
+        </div>
+        <div className="hint">
+          {t("setup.data_dir_hint", "Where EET Mod Runner stores install logs, checkpoints, and backups. Leave empty to use the default (next to the exe).")}
+        </div>
+      </div>
+      </div>{/* end locked wrapper */}
     </div>
   );
 }

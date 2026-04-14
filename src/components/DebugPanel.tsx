@@ -1,5 +1,7 @@
 import { useState, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { useI18n } from "../lib/i18n";
+import { DEFAULT_FORGE_URL } from "../App";
 import type { AppConfig, ParsedLog } from "../App";
 import { pickFile } from "../lib/tauri-bridge";
 import { fetchKnownIssues, fetchAllModKnownIssues, type KnownIssue } from "../lib/forge-data";
@@ -125,9 +127,11 @@ interface Props {
   config: AppConfig;
   forgeOnline: boolean | null;
   parsedLog: ParsedLog | null;
+  installRunning?: boolean;
 }
 
-export default function DebugPanel({ config, forgeOnline, parsedLog }: Props) {
+export default function DebugPanel({ config, forgeOnline, parsedLog, installRunning }: Props) {
+  const { t } = useI18n();
   const [result, setResult] = useState<DebugResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [loadingMsg, setLoadingMsg] = useState("");
@@ -160,7 +164,7 @@ export default function DebugPanel({ config, forgeOnline, parsedLog }: Props) {
       // Combine global known_issues.json + per-mod ki fields
       let knownIssues: KnownIssue[] = [];
       if (forgeOnline) {
-        const baseUrl = config.forge_data_url || "https://anprionsa.github.io/eet-mod-forge";
+        const baseUrl = config.forge_data_url || DEFAULT_FORGE_URL;
 
         // 1. Fetch global patterns
         try {
@@ -225,22 +229,32 @@ export default function DebugPanel({ config, forgeOnline, parsedLog }: Props) {
 
   return (
     <div>
-      <h2>Debug Analysis</h2>
+      <h2>{t("debug.heading", "Debug Analysis")}</h2>
       <p style={{ color: "var(--txd)", marginBottom: 20, fontSize: 13 }}>
-        Load a WeiDU debug log (WSETUP.DEBUG, Setup-*.debug) to diagnose
-        installation issues. Handles files up to 500MB+.
+        {t("debug.desc", "Load a WeiDU debug log (WSETUP.DEBUG, Setup-*.debug) to diagnose installation issues. Handles files up to 500MB+.")}
       </p>
+
+      {installRunning && (
+        <div style={{
+          textAlign: "center", padding: "8px 0", marginBottom: 16, borderRadius: 6,
+          background: "linear-gradient(90deg, transparent, rgba(255,180,40,0.12), transparent)",
+          borderTop: "1px solid rgba(255,180,40,0.3)", borderBottom: "1px solid rgba(255,180,40,0.3)",
+          fontSize: 12, fontWeight: 600, color: "var(--gold)",
+        }}>
+          {t("debug.locked", "Install in progress \u2014 debug analysis is paused")}
+        </div>
+      )}
 
       {/* Drop zone — shown when no result and not loading */}
       {!result && !loading && (
         <div className="drop-zone" onClick={loadDebugFile}>
           <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.5px", color: "var(--gold)", marginBottom: 8, fontWeight: 600 }}>
-            WeiDU Debug Log
+            {t("debug.drop_label", "WeiDU Debug Log")}
           </div>
           <div className="icon">{"\u2B07"}</div>
           <div>WSETUP.DEBUG or Setup-*.debug</div>
           <div style={{ fontSize: 11, marginTop: 4, color: "var(--txd)" }}>
-            Click to select a debug log file
+            {t("debug.drop_hint", "Click to select a debug log file")}
           </div>
         </div>
       )}
@@ -249,7 +263,7 @@ export default function DebugPanel({ config, forgeOnline, parsedLog }: Props) {
       {loading && (
         <div className="install-dashboard" style={{ textAlign: "center", padding: 32 }}>
           <div style={{ color: "var(--gold)", fontSize: 16, fontWeight: 600, marginBottom: 8 }}>
-            Parsing...
+            {t("debug.parsing", "Parsing...")}
           </div>
           <div style={{ color: "var(--txd)", fontSize: 13 }}>{loadingMsg}</div>
           <div className="progress-bar" style={{ height: 4, marginTop: 16 }}>
@@ -262,10 +276,10 @@ export default function DebugPanel({ config, forgeOnline, parsedLog }: Props) {
       {result && (
         <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
           <button className="btn" onClick={loadDebugFile} disabled={loading}>
-            Load Different File
+            {t("debug.load_different", "Load Different File")}
           </button>
           <button className="btn" onClick={copyReport}>
-            {reportCopied ? "Copied!" : "Copy Bug Report"}
+            {reportCopied ? t("debug.copied", "Copied!") : t("debug.copy_report", "Copy Bug Report")}
           </button>
         </div>
       )}
@@ -287,7 +301,7 @@ export default function DebugPanel({ config, forgeOnline, parsedLog }: Props) {
               <div className="number" style={{ color: "var(--grn)" }}>
                 {result.summary.success_count}
               </div>
-              <div className="label">Total Installed</div>
+              <div className="label">{t("debug.total_installed", "Total Installed")}</div>
               <div style={{ fontSize: 10, color: "var(--txd)", marginTop: 4 }}>
                 <span style={{ color: "var(--grn)" }}>{result.summary.success_count - result.summary.installed_with_warnings}</span> clean
                 {result.summary.installed_with_warnings > 0 && (
@@ -299,13 +313,13 @@ export default function DebugPanel({ config, forgeOnline, parsedLog }: Props) {
               <div className="number" style={{ color: "var(--red)" }}>
                 {result.summary.errors.length}
               </div>
-              <div className="label">Errors</div>
+              <div className="label">{t("debug.card_errors", "Errors")}</div>
             </div>
             <div className="summary-card">
               <div className="number" style={{ color: "var(--blu)" }}>
                 {result.matched.length}
               </div>
-              <div className="label">Known Issues</div>
+              <div className="label">{t("debug.card_known", "Known Issues")}</div>
             </div>
           </div>
 
@@ -409,7 +423,7 @@ export default function DebugPanel({ config, forgeOnline, parsedLog }: Props) {
 
       {/* ── Install Comparison ── */}
       <div style={{ marginTop: 24, borderTop: "1px solid var(--brd)", paddingTop: 16 }}>
-        <h2>Install Comparison</h2>
+        <h2>{t("debug.comparison", "Install Comparison")}</h2>
         <p style={{ color: "var(--txd)", marginBottom: 12, fontSize: 13 }}>
           Compare your Forge export against what actually installed. Shows exactly
           which components are missing and which mods failed completely.
@@ -419,7 +433,7 @@ export default function DebugPanel({ config, forgeOnline, parsedLog }: Props) {
 
       {/* ── GUI Log ── */}
       <div style={{ marginTop: 24, borderTop: "1px solid var(--brd)", paddingTop: 16 }}>
-        <h2>GUI Log</h2>
+        <h2>{t("debug.gui_log", "GUI Log")}</h2>
         <p style={{ color: "var(--txd)", marginBottom: 12, fontSize: 13 }}>
           Application-level log for diagnosing GUI issues. Does not contain WeiDU
           or mod_installer output.
@@ -653,6 +667,7 @@ function InstallComparison({ config, parsedLog }: { config: AppConfig; parsedLog
 }
 
 function GuiLogViewer() {
+  const { t } = useI18n();
   const [logContent, setLogContent] = useState<string | null>(null);
   const [logPath, setLogPath] = useState<string>("");
   const [copied, setCopied] = useState(false);
@@ -687,7 +702,7 @@ function GuiLogViewer() {
     <div>
       <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
         <button className="btn btn-primary" onClick={loadLog}>
-          {logContent === null ? "Load GUI Log" : "Refresh"}
+          {logContent === null ? t("debug.load_gui_log", "Load GUI Log") : t("btn.refresh", "Refresh")}
         </button>
         {logContent !== null && (
           <>
@@ -695,7 +710,7 @@ function GuiLogViewer() {
               {copied ? "Copied!" : "Copy to Clipboard"}
             </button>
             <button className="btn btn-danger" onClick={handleClear}>
-              Clear Log
+              {t("debug.clear_log", "Clear Log")}
             </button>
           </>
         )}
@@ -721,7 +736,7 @@ function GuiLogViewer() {
                   {line}
                 </div>
               ))
-            : <div style={{ color: "var(--txd)" }}>Log is empty</div>
+            : <div style={{ color: "var(--txd)" }}>{t("debug.empty_log", "Log is empty")}</div>
           }
         </div>
       )}
