@@ -26,29 +26,29 @@
   "platforms": {
     "windows-x86_64": {
       "zip": "binaries/windows-x86_64.zip",
-      "zip_sha256": "dab53227f7960921226c40472e24c6eacb04809c0629943053b9b920b64f1a23",
-      "zip_size": 2486052,
+      "zip_sha256": "5dfef35fe7868c5d9b3f990bba50012daf2f608e19184a978a459a346ffd0f0a",
+      "zip_size": 2474998,
       "weidu_path_in_zip": "WeiDU-Windows/weidu.exe",
-      "weidu_sha256": "2fa544124983f53cd2ae769be3c054a99316ad55298d0650afacd5bbf422fde9",
-      "weidu_size": 8496640,
+      "weidu_sha256": "69d465e5094817b108f9e34221d9cbe225fbce3876a230eae4b3a007f3b500b7",
+      "weidu_size": 8506880,
       "patch_revision": 2
     },
     "macos": {
       "zip": "binaries/macos.zip",
-      "zip_sha256": "c6417f49eedb94453571faa1873658bb9ed41f588c5195a4ba5b8f9bcafcb5d0",
-      "zip_size": 2263570,
+      "zip_sha256": "7c465a08bbe509fe3dce5f2470351267ca86c3442d3304b4432c5db3b96e66df",
+      "zip_size": 2268861,
       "weidu_path_in_zip": "WeiDU-Mac/weidu",
-      "weidu_sha256": "4e736690d567f1501e3eb6d1387f7eee5a53a5b43d4ebd4f7806b9a24684f466",
-      "weidu_size": 8418936,
+      "weidu_sha256": "98f9e68276da25d942eedb57861713e1f2efd3f70217ed7e2a3c46d81dd745db",
+      "weidu_size": 8437032,
       "patch_revision": 1
     },
     "linux-x86_64": {
       "zip": "binaries/linux-x86_64.zip",
-      "zip_sha256": "55e818abc7eaabb0f5bb4258c2ef603392e74cdf20371e2b68bad512bd1ca0af",
-      "zip_size": 2554369,
+      "zip_sha256": "92de23dca920c5ef10c1e5d3e202f77c67630bd941423f85f8e699ca16d2a529",
+      "zip_size": 2558850,
       "weidu_path_in_zip": "WeiDU-Linux/weidu",
-      "weidu_sha256": "93be5752db20b71650c725b8f59aaa0aa901f67c1a9fbdd0b88ef5a3a1d9465b",
-      "weidu_size": 1851200,
+      "weidu_sha256": "dee195be4eb9c652b2b5e73747b8c318b79269b36d96f29231a97d58ed488a1c",
+      "weidu_size": 1856072,
       "patch_revision": 1
     }
   }
