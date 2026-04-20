@@ -203,43 +203,12 @@ jobs:
 
       - name: Run headless compile tests
         shell: bash
-        working-directory: ${{ env.WEIDU_SRC }}/test
-        run: |
-          set -eu
-          fail=0
-
-          echo "=== good-syntax — expect success ==="
-          for f in good-syntax/*.d; do
-            echo "--- $f"
-            if ! "$WEIDU_BIN" --nogame "$f"; then
-              echo "FAIL: $f should have compiled"
-              fail=1
-            fi
-          done
-
-          echo "=== bad-syntax — expect failure ==="
-          for f in bad-syntax/*.d; do
-            echo "--- $f"
-            if "$WEIDU_BIN" --nogame "$f" >/dev/null 2>&1; then
-              echo "FAIL: $f should have failed to compile"
-              fail=1
-            fi
-          done
-
-          echo "=== no-game — expect success ==="
-          for f in no-game/*.d; do
-            echo "--- $f"
-            if ! "$WEIDU_BIN" --nogame "$f"; then
-              echo "FAIL: $f should have compiled"
-              fail=1
-            fi
-          done
-
-          if [ "$fail" -ne 0 ]; then
-            echo "Smoke tests failed."
-            exit 1
-          fi
-          echo "All smoke tests passed."
+        # Delegate to the maintained local script in tools/. It knows that
+        # WeiDU exits 0 even on parse errors in --nogame compile mode and
+        # checks output for error markers (FATAL ERROR / PARSE ERROR /
+        # syntax error) instead of exit codes. Also validates the
+        # BCS_CACHE_STATS_JSON line is emitted (cache module wired in).
+        run: bash src-tauri/weidu_experimental/tools/smoke_test.sh "$WEIDU_BIN"
 
   # ── Commit back ──
   # Gated on smoke-test: binaries only ship if headless compile tests pass.
