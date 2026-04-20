@@ -1,15 +1,22 @@
 mod backup;
 mod commands;
 mod config;
+mod defender;
 pub mod installer;
+mod paths;
+mod weidu_swap;
 
 use commands::*;
+use paths::{create_diagnostic_bundle, get_log_paths, open_path};
+use weidu_swap::{
+    weidu_swap_clear_cache, weidu_swap_extract, weidu_swap_meta,
+    weidu_swap_resolve_path, weidu_swap_status,
+};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
@@ -32,6 +39,7 @@ pub fn run() {
             read_gui_log,
             clear_gui_log,
             get_gui_log_path,
+            rotate_gui_log,
             save_download_cache,
             load_download_cache,
             count_weidu_log_entries,
@@ -45,6 +53,8 @@ pub fn run() {
             install_pause,
             install_resume,
             install_send_input,
+            test_junction_capability,
+            check_disk_spaces,
             abort_native_install,
             check_install_checkpoint,
             estimate_backup,
@@ -52,7 +62,22 @@ pub fn run() {
             list_backups,
             restore_backup,
             delete_backup,
+            verify_backup,
             abort_backup,
+            scan_orphan_backups,
+            clean_orphan_backups,
+            weidu_swap_status,
+            weidu_swap_extract,
+            weidu_swap_clear_cache,
+            weidu_swap_resolve_path,
+            weidu_swap_meta,
+            defender_status,
+            defender_is_path_excluded,
+            defender_add_exclusion,
+            defender_remove_exclusion,
+            get_log_paths,
+            open_path,
+            create_diagnostic_bundle,
         ])
         .on_window_event(|_window, event| {
             if let tauri::WindowEvent::CloseRequested { .. } = event {

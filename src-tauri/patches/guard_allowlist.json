@@ -1,0 +1,23 @@
+{
+  "_comment": "File-guard allowlist. Only consulted for files matching WATCHLIST patterns in installer/file_guard.rs. Rules allow specified drifting_mod + file_pattern combinations to modify files silently without triggering restore. Patterns use simple wildcards (* matches any characters); matching is case-insensitive, anchored. Add user rules to data_dir/guard_allowlist_user.json.",
+  "rules": [
+    {
+      "id": "adrian_self_updates",
+      "drifting_mod": "adrian",
+      "file_pattern": "override/RH#ADR*",
+      "reason": "Adrian NPC legitimately modifies its own CRE files during multi-component install"
+    },
+    {
+      "id": "eet_end_finalization",
+      "drifting_mod": "eet_end",
+      "file_pattern": "override/*",
+      "reason": "EET_end is the final integration step; its sweeping modifications are by design"
+    },
+    {
+      "id": "mih_metamod_cleanup",
+      "drifting_mod": "mih_metamod",
+      "file_pattern": "override/*",
+      "reason": "mih_metamod cleanup_override biffs+culls override by design; patch #29 handles IDS/BCS/CAMPAIGN.2DA protection"
+    }
+  ]
+}

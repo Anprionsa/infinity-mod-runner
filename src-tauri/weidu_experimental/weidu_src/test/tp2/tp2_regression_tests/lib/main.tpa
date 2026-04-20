@@ -1,0 +1,50 @@
+OUTER_SET tests = 0
+OUTER_SET passed = 0
+OUTER_SET warnings = 0
+
+DEFINE_ACTION_FUNCTION handle_results
+  INT_VAR
+    success = 0
+    warnings = 0
+    passed = 0
+  STR_VAR
+    message = ""
+  RET
+    warnings
+    passed
+BEGIN
+  ACTION_IF !success AND stop_on_errors BEGIN
+    FAIL "ERROR: %message%"
+  END ELSE ACTION_IF !success BEGIN
+    WARN "SUPPRESSED ERROR: %message%"
+    OUTER_SET ++warnings
+  END ELSE ACTION_IF success BEGIN
+    OUTER_SET ++passed
+  END
+END
+
+DEFINE_ACTION_MACRO run_tests BEGIN
+  LAF run RET success message END
+  LAF handle_results
+    INT_VAR
+      success
+      warnings
+      passed
+    STR_VAR
+      message
+    RET
+      warnings
+      passed
+  END
+  OUTER_SET ++tests
+END
+
+ACTION_BASH_FOR ~%MOD_FOLDER%/lib/tests~ ~.+\.tpa$~ BEGIN
+  INCLUDE ~%BASH_FOR_FILESPEC%~
+  LAM run_tests
+END
+
+INCLUDE ~%MOD_FOLDER%/lib/get_runtime_info.tpa~
+LAF get_runtime_info RET game engine END
+PRINT "Game was detected as %game% and Engine was detected as %engine%"
+PRINT "%passed% out of %tests% tests passed with %warnings% warnings"

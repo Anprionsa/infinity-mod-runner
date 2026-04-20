@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    eet_mod_runner_lib::run()
+    infinity_mod_runner_lib::run()
 }

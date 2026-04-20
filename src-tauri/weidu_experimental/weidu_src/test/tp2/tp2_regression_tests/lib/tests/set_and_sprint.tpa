@@ -1,0 +1,194 @@
+DEFINE_ACTION_FUNCTION run
+  RET
+    success
+    message
+BEGIN
+  OUTER_SPRINT message "test_set_and_sprint"
+  PRINT "%message%"
+  ACTION_TRY
+    LAF test_set END
+    LAF test_sprint END
+    LAF test_global_set END
+    LAF test_global_sprint END
+    LAF test_global_with_VARIABLE_IS_star END
+    LAF test_global_arrays END
+    OUTER_SET success = 1
+  WITH
+    DEFAULT
+      OUTER_SET success = 0
+      OUTER_SPRINT message "tests failed in test_set_and_sprint: %ERROR_MESSAGE%"
+  END
+END
+
+/* SET */
+DEFINE_ACTION_FUNCTION test_set BEGIN
+  OUTER_SET foo = 3
+  ACTION_IF NOT foo = 3 BEGIN
+    FAIL "test_set failed to set as expected"
+  END
+  OUTER_SET foo += 3
+  ACTION_IF NOT foo = 6 BEGIN
+    FAIL "test_set failed to add as expected"
+  END
+  OUTER_INNER_PATCH 0 BEGIN
+    foo /= 2
+    PATCH_IF NOT foo = 3 BEGIN
+      PATCH_FAIL "test_set failed to divide as expected"
+    END
+  END
+  OUTER_SET $foo(bar) = 4
+  OUTER_SET baz = $foo(bar)
+  ACTION_IF NOT baz = 4 BEGIN
+    FAIL "test_set failed to set with array expression"
+  END
+  DEFINE_ACTION_FUNCTION test_set_inner BEGIN
+    OUTER_SET foo = 5
+  END
+  LAF test_set_inner END
+  ACTION_IF foo = 5 BEGIN
+    FAIL "test_set failed scope test"
+  END
+  OUTER_SET_IDS_SYMBOL_OF_INT foobar spell 1101
+  ACTION_IF "%foobar%" STR_CMP "CLERIC_BLESS" BEGIN
+    FAIL "test_set failed IDS_SYMBOL_OF_INT: got %foobar% while expecting CLERIC_BLESS"
+  END
+END
+
+/* SPRINT and TEXT_SPRINT */
+DEFINE_ACTION_FUNCTION test_sprint BEGIN
+  OUTER_SPRINT foo bar
+  OUTER_TEXT_SPRINT bazt quux
+  ACTION_IF "%foo%" STR_CMP bar OR
+            "%bazt%" STR_CMP quux  BEGIN
+    FAIL "test_sprint failed to set as expected (action)"
+  END
+  OUTER_INNER_PATCH 0 BEGIN
+    SPRINT foo baz
+    PATCH_IF "%foo%" STR_CMP baz BEGIN
+      PATCH_FAIL "test_sprint failed to set as expected (patch)"
+    END
+  END
+  OUTER_SPRINT $foo(bar) baz
+  OUTER_SPRINT quux $foo(bar)
+  ACTION_IF "%quux%" STR_CMP baz BEGIN
+    FAIL "test_sprint failed to set with array expression"
+  END
+  DEFINE_ACTION_FUNCTION test_sprint_inner BEGIN
+    OUTER_SPRINT foo foobar
+  END
+  LAF test_sprint_inner END
+  ACTION_IF "%foo%" STR_EQ foobar BEGIN
+    FAIL "test_sprint failed scope test"
+  END
+END
+
+/* SET GLOBAL */
+DEFINE_ACTION_FUNCTION test_global_set BEGIN
+  DEFINE_ACTION_FUNCTION test_global_set_inner1 BEGIN
+    OUTER_SET GLOBAL fl#global#foo = 3
+  END
+  LAF test_global_set_inner1 END
+  ACTION_IF NOT fl#global#foo = 3 BEGIN
+    FAIL "test_global_set failed to set as expected"
+  END
+  DEFINE_ACTION_FUNCTION test_global_set_inner2 BEGIN
+    OUTER_SET GLOBAL fl#global#foo += 3
+  END
+  LAF test_global_set_inner2 END
+  ACTION_IF NOT fl#global#foo = 6 BEGIN
+    FAIL "test_global_set failed to add as expected"
+  END
+  DEFINE_PATCH_FUNCTION test_global_set_inner3 BEGIN
+    GLOBAL fl#global#foo /= 2
+  END
+  OUTER_INNER_PATCH 0 BEGIN
+    LPF test_global_set_inner3 END
+    PATCH_IF NOT fl#global#foo = 3 BEGIN
+      PATCH_FAIL "test_global_set failed to divide as expected"
+    END
+  END
+  DEFINE_ACTION_FUNCTION test_global_set_inner4 BEGIN
+    OUTER_SET GLOBAL $foo(fl global bar) = 4
+    OUTER_SET GLOBAL fl#global#baz = $foo(fl global bar)
+  END
+  LAF test_global_set_inner4 END
+  ACTION_IF NOT fl#global#baz = 4 BEGIN
+    FAIL "set_global_set failed to set with array expression"
+  END
+END
+
+/* SPRINT GLOBAL and TEXT_SPRINT GLOBAL */
+DEFINE_ACTION_FUNCTION test_global_sprint BEGIN
+  DEFINE_ACTION_FUNCTION test_global_sprint_inner1 BEGIN
+    OUTER_SPRINT GLOBAL fl#global#foos bar
+    OUTER_TEXT_SPRINT GLOBAL fl#global#bars baz
+  END
+  LAF test_global_sprint_inner1 END
+  ACTION_IF "%fl#global#foos%" STR_CMP bar OR
+            "%fl#global#bars%" STR_CMP baz    BEGIN
+    FAIL "test_global_sprint failed to set as expected"
+  END
+  DEFINE_ACTION_FUNCTION test_global_sprint_inner2 BEGIN
+    OUTER_SPRINT GLOBAL $foo(fl global bar) baz
+    OUTER_SPRINT GLOBAL fl#global#quux $foo(fl global bar)
+  END
+  LAF test_global_sprint_inner2 END
+  ACTION_IF "%fl#global#quux%" STR_CMP baz BEGIN
+    FAIL "test_global_sprint failed to set with array expression"
+  END
+END
+
+DEFINE_ACTION_FUNCTION test_global_with_VARIABLE_IS_star BEGIN
+  OUTER_SET GLOBAL fl#global#unique1 = 1
+  OUTER_SET GLOBAL $global(fl unique2) = 2
+  ACTION_IF NOT VARIABLE_IS_SET fl#global#unique1 BEGIN
+    FAIL "test_global_with_VARIABLE_IS_*: variable is not set"
+  END
+  ACTION_IF NOT VARIABLE_IS_SET $global(fl unique2) BEGIN
+    FAIL "test_global_with_VARIABLE_IS_*: array construct is not set"
+  END
+  ACTION_IF NOT VARIABLE_IS_IN_ARRAY $global(fl unique2) BEGIN
+    FAIL "test_global_with_VARIABLE_IS_*: variable is not in array"
+  END
+END
+
+DEFINE_ACTION_FUNCTION test_global_arrays BEGIN
+  DEFINE_ACTION_FUNCTION test_global_arrays_inner BEGIN
+    OUTER_SPRINT GLOBAL $fl#global(3) baz
+    OUTER_SPRINT GLOBAL $fl#global(1) foo
+    OUTER_SPRINT GLOBAL $fl#global(4) quux
+    OUTER_SPRINT GLOBAL $fl#global(2) bar
+  END
+  LAF test_global_arrays_inner END
+  ACTION_SORT_ARRAY_INDICES fl#global NUMERICALLY
+  OUTER_SPRINT $expected(1) foo
+  OUTER_SPRINT $expected(2) bar
+  OUTER_SPRINT $expected(3) baz
+  OUTER_SPRINT $expected(4) quux
+  OUTER_SET index = 0
+  ACTION_IF NOT VARIABLE_IS_IN_ARRAY $fl#global(1) BEGIN
+    FAIL "test_global_arrays: expected array construct was not set"
+  END
+  ACTION_PHP_EACH fl#global AS key => value BEGIN
+    OUTER_SET ++ index
+    ACTION_IF NOT key = index BEGIN
+      FAIL "test_global_arrays: array is expected to be sorted but is not"
+    END
+    ACTION_IF "%value%" STR_CMP $expected("%index%") BEGIN
+      FAIL "test_global_arrays: values are out of expected order"
+    END
+  END
+  ACTION_CLEAR_ARRAY fl#global
+  ACTION_PHP_EACH fl#global AS _ => _ BEGIN
+    OUTER_SET ++ index
+  END
+  ACTION_IF NOT index = 4 BEGIN
+    FAIL "test_global_arrays: at end of test index does not have expected value"
+  END
+  OUTER_SET GLOBAL $fl#global2(foo) = 1
+  OUTER_SET GLOBAL $fl#global2(bar) = 1
+  OUTER_SET GLOBAL $fl#global2(bar) += 1
+  ACTION_IF NOT VARIABLE_IS_IN_ARRAY $fl#global2(foo) BEGIN
+    FAIL "test_global_arrays: right-hand array construct does assignment"
+  END
+END

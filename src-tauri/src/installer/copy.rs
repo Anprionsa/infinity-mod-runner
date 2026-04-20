@@ -194,7 +194,7 @@ pub fn build_mod_folder_index(mod_dir: &Path, depth: usize) -> std::collections:
 }
 
 /// Directory names to skip during indexing — these contain partial/patched files, not full mods.
-const INDEX_SKIP_DIRS: &[&str] = &["EET Mod Forge Patches", "eet-mod-forge-patches", "patches", ".git"];
+const INDEX_SKIP_DIRS: &[&str] = &["Infinity Mod Forge Patches", "infinity-mod-forge-patches", "EET Mod Forge Patches", "eet-mod-forge-patches", "patches", ".git"];
 
 fn index_tp2_recursive(
     dir: &Path,

@@ -1,0 +1,55 @@
+{
+  "schema_version": 1,
+  "_maintenance_note": "Platform patch revisions differ: windows-x86_64 is at rev 2 (resilient-decompile + BCS buffer cache, built locally on 2026-04-19). macos and linux-x86_64 are still at rev 1 (resilient-decompile only) pending CI rebuild via weidu-rebuild.yml. Top-level patch_revision tracks the latest intended revision; per-platform patch_revision under each platforms entry is the ground truth for what the zip actually contains.",
+  "feature_id": "resilient_weidu",
+  "display_name": "Resilient WeiDU (experimental)",
+  "status": "experimental",
+  "base_weidu_version": "251",
+  "patch_revision": 2,
+  "build_version": "25201",
+  "source_tree": "weidu_src/",
+  "description": "Bundled WeiDU build with mod-runner modifications. Current revision treats BCS decompile/recompile round-trip failures as non-fatal inside DECOMPILE_AND_PATCH blocks. Instead of aborting the install when a script can't survive a round-trip (often caused by IDS-state changes in large mod stacks like Ajantis NPC, Golem Construction, SoD companions), WeiDU logs a warning and returns the original buffer unchanged.",
+  "what_it_changes": [
+    "Adds a decompile_and_patch_context flag to track DECOMPILE_AND_PATCH scope.",
+    "Catches COMPILE_BAF_TO_BCS exceptions inside that scope \u00e2\u2020\u2019 return original, warn.",
+    "Catches COMPILE_BCS_TO_BAF exceptions inside that scope \u00e2\u2020\u2019 return original, warn.",
+    "Outside DECOMPILE_AND_PATCH, preserves upstream behaviour (only the hardcoded RDOG/RDWARF/etc. list is ignored; others raise)."
+  ],
+  "risks": [
+    "Replaces weidu.exe and all setup-*.exe in the install directory \u00e2\u20ac\u201d affects every mod install, not just EET.",
+    "Not an official WeiDU release \u00e2\u20ac\u201d mod authors cannot reproduce bug reports against it.",
+    "Must be applied BEFORE installing mods. Mid-install toggling is not supported.",
+    "Silencing a round-trip failure means the mod's intended patch is skipped for that script; the mod may later detect missing changes and behave unexpectedly."
+  ],
+  "complementary": "Works alongside the TP2-level SFO PATCH_TRY patches (ALTER_SCRIPT_BLOCK resilience). These source modifications cover DECOMPILE_AND_PATCH; the SFO patches cover ALTER_SCRIPT_BLOCK.",
+  "upstream_snapshot": "https://github.com/WeiDUorg/weidu \u00e2\u20ac\u201d vendored from WeiDU 251 (devel branch). Source lives at weidu_src/; deltas are tracked in this repo's git log.",
+  "platforms": {
+    "windows-x86_64": {
+      "zip": "binaries/windows-x86_64.zip",
+      "zip_sha256": "dab53227f7960921226c40472e24c6eacb04809c0629943053b9b920b64f1a23",
+      "zip_size": 2486052,
+      "weidu_path_in_zip": "WeiDU-Windows/weidu.exe",
+      "weidu_sha256": "2fa544124983f53cd2ae769be3c054a99316ad55298d0650afacd5bbf422fde9",
+      "weidu_size": 8496640,
+      "patch_revision": 2
+    },
+    "macos": {
+      "zip": "binaries/macos.zip",
+      "zip_sha256": "c6417f49eedb94453571faa1873658bb9ed41f588c5195a4ba5b8f9bcafcb5d0",
+      "zip_size": 2263570,
+      "weidu_path_in_zip": "WeiDU-Mac/weidu",
+      "weidu_sha256": "4e736690d567f1501e3eb6d1387f7eee5a53a5b43d4ebd4f7806b9a24684f466",
+      "weidu_size": 8418936,
+      "patch_revision": 1
+    },
+    "linux-x86_64": {
+      "zip": "binaries/linux-x86_64.zip",
+      "zip_sha256": "55e818abc7eaabb0f5bb4258c2ef603392e74cdf20371e2b68bad512bd1ca0af",
+      "zip_size": 2554369,
+      "weidu_path_in_zip": "WeiDU-Linux/weidu",
+      "weidu_sha256": "93be5752db20b71650c725b8f59aaa0aa901f67c1a9fbdd0b88ef5a3a1d9465b",
+      "weidu_size": 1851200,
+      "patch_revision": 1
+    }
+  }
+}

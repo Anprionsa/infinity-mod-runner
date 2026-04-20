@@ -1,0 +1,43 @@
+DEFINE_ACTION_FUNCTION run
+  RET
+    success
+    message
+BEGIN
+  OUTER_SPRINT message "test_sprintf"
+  PRINT "%message%"
+  ACTION_TRY
+    LAF test_sprintf END
+    OUTER_SET success = 1
+  WITH
+    DEFAULT
+      OUTER_SET success = 0
+      OUTER_SPRINT message "tests failed in test_sprintf: %ERROR_MESSAGE%"
+  END
+END
+
+DEFINE_ACTION_FUNCTION test_sprintf BEGIN
+  OUTER_SPRINTF one_two "%d %d" (1 2)
+  OUTER_SPRINT expected_one_two "1 2"
+  OUTER_SPRINTF string_one "%s %d" (foo 1)
+  OUTER_SPRINT expected_string_one "foo 1"
+  OUTER_SPRINT var bar
+  OUTER_SPRINTF var_bar "%s" ("%var%")
+  OUTER_SPRINT expected_var_bar bar
+  OUTER_SET var2 = 5
+  OUTER_SPRINTF var_bar2 "%d" (var2)
+  OUTER_SPRINT expected_var_bar2 "5"
+  OUTER_SPRINTF hex "%x" (16)
+  OUTER_SPRINT expected_hex "0x10"
+  ACTION_DEFINE_ASSOCIATIVE_ARRAY tests BEGIN
+    "%one_two%" => "%expected_one_two%"
+    "%string_one%" => "%expected_string_one%"
+    "%var_bar%" => "%expected_var_bar%"
+    "%var_bar2%" => "%expected_var_bar2%"
+    "%hex%" => "%expected_hex%"
+  END
+  ACTION_PHP_EACH tests AS var => expected BEGIN
+    ACTION_IF "%var%" STR_CMP "%expected%" BEGIN
+      FAIL "test_sprintf got %var% but expected %expected%"
+    END
+  END
+END

@@ -1,0 +1,6 @@
+IF
+  Global("fl#when","GLOBAL",1)
+THEN
+  RESPONSE #100
+    NoAction()
+END

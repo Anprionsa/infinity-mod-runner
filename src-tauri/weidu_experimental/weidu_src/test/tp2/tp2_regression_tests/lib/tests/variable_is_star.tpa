@@ -1,0 +1,72 @@
+DEFINE_ACTION_FUNCTION run
+  RET
+    success
+    message
+BEGIN
+  OUTER_SPRINT message "test_variable_is_*"
+  PRINT "%message%"
+  ACTION_TRY
+    LAF test_variable_is_set END
+    LAF test_variable_is_in_array END
+    OUTER_SET success = 1
+  WITH
+    DEFAULT
+      OUTER_SET success = 0
+      OUTER_SPRINT message "tests failed in test_variable_is_*: %ERROR_MESSAGE%"
+  END
+END
+
+DEFINE_ACTION_FUNCTION test_variable_is_set BEGIN
+  OUTER_SET foo = 1
+  OUTER_SET $bar(baz) = 1
+  ACTION_IF NOT VARIABLE_IS_SET foo BEGIN
+    FAIL "test_variable_is_set failed on set variable"
+  END
+  ACTION_IF NOT VARIABLE_IS_SET $bar(baz) BEGIN
+    FAIL "test_variable_is_set failed on set array variable"
+  END
+  ACTION_IF VARIABLE_IS_SET quux BEGIN
+    FAIL "test_variable_is_set does not have a clean test environment"
+  END
+  WITH_SCOPE BEGIN
+    OUTER_SET quux = 1
+  END
+  ACTION_IF VARIABLE_IS_SET quux BEGIN
+    FAIL "test_variable_is_set failed on intended-to-be unset variable"
+  END
+  
+  // Then there is the whole behaviour with CLEAR_MEMORY, but that is
+  // a figurative nuclear bomb that levels the test environment
+END
+
+DEFINE_ACTION_FUNCTION test_variable_is_in_array BEGIN
+  OUTER_SET $foo(bar) = 1
+  ACTION_IF NOT VARIABLE_IS_IN_ARRAY $foo(bar) BEGIN
+    FAIL "test_variable_is_in_array failed on set array variable"
+  END
+  ACTION_CLEAR_ARRAY foo
+  ACTION_IF VARIABLE_IS_IN_ARRAY $foo(bar) BEGIN
+    FAIL "test_variable_is_in_array failed after clearing array"
+  END
+  ACTION_IF VARIABLE_IS_IN_ARRAY $array(baz) BEGIN
+    FAIL "test_variable_is_in_array does not have a clean test environment"
+  END
+  DEFINE_ACTION_FUNCTION ret_array RET_ARRAY array BEGIN
+    OUTER_SET $array(baz) = 1
+  END
+  LAF ret_array RET_ARRAY array END
+  ACTION_IF NOT VARIABLE_IS_IN_ARRAY $array(baz) BEGIN
+    FAIL "test_variable_is_in_array failed on RET_ARRAY'd variable"
+  END
+  OUTER_SET $foo_bar(baz) = 1
+  ACTION_IF NOT VARIABLE_IS_IN_ARRAY $foo_bar(baz) BEGIN
+    FAIL "test_variable_is_in_array failed on underscored array"
+  END
+  OUTER_SET $foo(bar baz_quux) = 1
+  ACTION_IF NOT VARIABLE_IS_IN_ARRAY $foo(bar baz_quux) BEGIN
+    FAIL "test_variable_is_in_array failed on underscored key"
+  END
+
+  // Likewise, there is a test-path here for behaviour after CLEAR_MEMORY,
+  // but...
+END

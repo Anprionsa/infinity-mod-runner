@@ -1,0 +1,58 @@
+DEFINE_ACTION_FUNCTION run
+  RET
+    success
+    message
+BEGIN
+  OUTER_SPRINT message "test_defined_values"
+  PRINT "%message%"
+  ACTION_TRY
+    LAF test_defined_as_function END
+    LAF test_defined_as_inlined END
+    OUTER_SET success = 1
+  WITH
+    DEFAULT
+      OUTER_SET success = 0
+      OUTER_SPRINT message "tests failed in test_defined_values: %ERROR_MESSAGE%"
+  END
+END
+
+DEFINE_ACTION_FUNCTION fl#functiona BEGIN END
+
+DEFINE_PATCH_FUNCTION fl#functionp BEGIN END
+
+DEFINE_DIMORPHIC_FUNCTION fl#function2 BEGIN END
+
+DEFINE_ACTION_FUNCTION test_defined_as_function BEGIN
+  ACTION_IF NOT (DEFINED_AS_FUNCTION fl#functiona = 1) BEGIN
+    FAIL "test_defined_as_function: expected action function was not defined as such"
+  END
+
+  ACTION_IF NOT (DEFINED_AS_FUNCTION fl#functionp = 2) BEGIN
+    FAIL "test_defined_as_function: expected patch function was not defined as such"
+  END
+
+  ACTION_IF NOT (DEFINED_AS_FUNCTION fl#function2 = 3) BEGIN
+    FAIL "test_defined_as_function: expected dimorphic function was not defined as such"
+  END
+
+  ACTION_IF DEFINED_AS_FUNCTION fl#fail_function BEGIN
+    FAIL "test_defined_as_function: return value was true for expected non-existent function"
+  END
+
+  ACTION_IF DEFINED_AS_FUNCTION fl#functiona = 2 BEGIN
+    FAIL "test_defined_as_function: expected action function was defined as patch"
+  END
+
+  ACTION_IF DEFINED_AS_FUNCTION fl#functionp = 1 BEGIN
+    FAIL "test_defined_as_function: expected patch function was defined as action"
+  END
+END
+
+DEFINE_ACTION_FUNCTION test_defined_as_inlined BEGIN
+  ACTION_IF NOT DEFINED_AS_INLINED ".../fl#inlined/null.file" BEGIN
+    FAIL "test_defined_as_inlined: expected inlined file was not defined"
+  END
+  ACTION_IF DEFINED_AS_INLINED ".../fl#not_defined" BEGIN
+    FAIL "test_defined_as_inlined: expected undefined file was defined"
+  END
+END

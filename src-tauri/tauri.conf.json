@@ -1,8 +1,8 @@
 {
   "$schema": "https://raw.githubusercontent.com/tauri-apps/tauri/dev/crates/tauri-config-schema/schema.json",
-  "productName": "EET Mod Runner",
-  "version": "0.9.0",
-  "identifier": "com.eetmodforge.runner",
+  "productName": "Infinity Mod Runner",
+  "version": "1.0.3",
+  "identifier": "com.infinitymodforge.runner",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:1420",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "EET Mod Runner",
+        "title": "Infinity Mod Runner",
         "width": 1100,
         "height": 750,
         "minWidth": 900,
@@ -36,14 +36,31 @@
       "icons/icon.ico"
     ],
     "resources": [
-      "patches/**/*"
-    ]
+      "patches/**/*",
+      "weidu_experimental/meta.json",
+      "weidu_experimental/binaries/*.zip"
+    ],
+    "licenseFile": "../LICENSE",
+    "windows": {
+      "nsis": {
+        "sidebarImage": "installer-assets/nsis-sidebar.bmp",
+        "headerImage": "installer-assets/nsis-header.bmp"
+      }
+    },
+    "macOS": {
+      "dmg": {
+        "background": "installer-assets/dmg-background.png",
+        "windowSize": { "width": 660, "height": 400 },
+        "appPosition": { "x": 180, "y": 180 },
+        "applicationFolderPosition": { "x": 480, "y": 180 }
+      }
+    }
   },
   "plugins": {
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDFFNTQyQzIyNTlENDMxMjkKUldRcE1kUlpJaXhVSGgwUE1PK1JUdWZPaXpjS1BpWldWaWRvRXJWS2hjZktLNXovNGwyUnBSczkK",
       "endpoints": [
-        "https://github.com/Anprionsa/eet-mod-runner/releases/latest/download/latest.json"
+        "https://github.com/Anprionsa/infinity-mod-runner/releases/latest/download/latest.json"
       ]
     }
   }

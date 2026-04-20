@@ -1,6 +1,6 @@
 //! Persistent install log — writes runner messages to disk for post-mortem analysis.
 //!
-//! Captures [EET Mod Runner] status messages, batch events, BCS scanner output,
+//! Captures [Infinity Mod Runner] status messages, batch events, BCS scanner output,
 //! and progress milestones. Does NOT capture raw WeiDU output (that goes to WSETUP.DEBUG).
 
 use std::fs::{File, OpenOptions};
@@ -20,7 +20,10 @@ pub struct InstallLogger {
 impl InstallLogger {
     /// Open (or create) the install log in append mode. Writes a session header.
     pub fn new(data_dir: &Path) -> Result<Self, String> {
-        let path = data_dir.join("install.log");
+        // Filename from paths::FILE_INSTALL_LOG — canonical source of truth.
+        // Drift prevention: changing the name requires changing the const,
+        // which flows here and to `resolve_log_paths` simultaneously.
+        let path = data_dir.join(crate::paths::FILE_INSTALL_LOG);
         let file = OpenOptions::new()
             .create(true)
             .append(true)
@@ -37,7 +40,7 @@ impl InstallLogger {
         let ts = format_timestamp();
         let sep = "=".repeat(80);
         let _ = writeln!(logger.writer, "\n{sep}");
-        let _ = writeln!(logger.writer, "EET Mod Runner Install Session — {ts}");
+        let _ = writeln!(logger.writer, "Infinity Mod Runner Install Session — {ts}");
         let _ = writeln!(logger.writer, "{sep}");
         let _ = logger.writer.flush();
 
@@ -70,20 +73,28 @@ impl InstallLogger {
         }
     }
 
-    /// Log a stdout line from the runner (only logs [EET Mod Runner] prefixed messages).
+    /// Log a stdout line from the runner (only logs [Infinity Mod Runner] prefixed messages).
     pub fn log_runner_stdout(&mut self, line: &str) {
-        if line.contains("[EET Mod Runner]") {
+        if line.contains("[Infinity Mod Runner]") {
             let ts = format_time();
             let _ = writeln!(self.writer, "[{ts}] {line}");
             let _ = self.writer.flush();
         }
     }
 
-    /// Log a stderr line (only short error-like lines).
+    /// Log a stderr line (only short error-like lines, plus any BCS
+    /// buffer cache stats emissions — those are always short and don't
+    /// contain "error/fatal/warning" but are essential for post-install
+    /// A/B diagnosis of the experimental cache).
     pub fn log_stderr(&mut self, line: &str) {
         if line.len() < 300 {
+            let is_cache_line = line.starts_with("BCS_CACHE_STATS_JSON ")
+                || line.starts_with("BCS buffer cache: ");
             let lower = line.to_lowercase();
-            if lower.contains("error") || lower.contains("fatal") || lower.contains("warning") {
+            let is_error = lower.contains("error")
+                || lower.contains("fatal")
+                || lower.contains("warning");
+            if is_cache_line || is_error {
                 let ts = format_time();
                 let _ = writeln!(self.writer, "[{ts}] [STDERR] {line}");
                 let _ = self.writer.flush();
@@ -121,6 +132,37 @@ pub fn shared_log_event(logger: &Option<SharedLogger>, event_type: &str, details
     if let Some(lg) = logger {
         if let Ok(mut l) = lg.lock() {
             l.log_event(event_type, details);
+        }
+    }
+}
+
+/// Globally-accessible handle to the currently-active install logger.
+///
+/// Set by the orchestrator at install start, cleared at install end.
+/// Lets external callers (e.g. the `abort_native_install` Tauri command)
+/// emit events like `[USER_ABORT]` into install.log without having to
+/// thread the logger through the async command surface.
+static ACTIVE_LOGGER: std::sync::OnceLock<Mutex<Option<SharedLogger>>> = std::sync::OnceLock::new();
+
+fn active_logger_slot() -> &'static Mutex<Option<SharedLogger>> {
+    ACTIVE_LOGGER.get_or_init(|| Mutex::new(None))
+}
+
+/// Register the active install logger so `log_active_event` can find it.
+pub fn set_active_logger(logger: Option<SharedLogger>) {
+    if let Ok(mut slot) = active_logger_slot().lock() {
+        *slot = logger;
+    }
+}
+
+/// Log an event to the currently-active install logger if any. Silent if
+/// no install is running.
+pub fn log_active_event(event_type: &str, details: &str) {
+    if let Ok(slot) = active_logger_slot().lock() {
+        if let Some(lg) = slot.as_ref() {
+            if let Ok(mut l) = lg.lock() {
+                l.log_event(event_type, details);
+            }
         }
     }
 }

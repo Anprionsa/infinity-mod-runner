@@ -62,7 +62,7 @@ pub fn build_weidu_args(batch: &Batch, config: &InstallConfig) -> Vec<String> {
 /// Output: ["--logapp", "--log", "path"] etc.
 fn parse_log_mode(mode: &str) -> Vec<String> {
     let mut flags = Vec::new();
-    // Always add --logapp first if present (mod_installer convention)
+    // Always add --logapp first if present
     if mode.contains("logapp") {
         flags.push("--logapp".to_string());
     }
@@ -154,12 +154,24 @@ mod tests {
             post_copy_delay_ms: 500,
             ocamlrunparam: "s=16M,o=500,O=1000000".to_string(),
             bcs_scanner: false,
+            force_small_batch_mods: crate::installer::FORCE_SMALL_BATCH_MODS.iter().map(|s| s.to_string()).collect(),
+            force_small_batch_size: crate::installer::FORCE_SMALL_BATCH_SIZE,
+            per_mod_timeout_secs: std::collections::HashMap::new(),
+            force_single_cn_mods: std::collections::HashMap::new(),
             readln_defaults: std::collections::HashMap::new(),
             readln_fallback: "1".to_string(),
             readln_timeout_secs: 30,
             auto_skip_after_retry: false,
             suppress_readmes: true,
             sibling_directories: std::collections::HashMap::new(),
+            data_directory: None,
+            tlk_prewarm: false,
+            tlk_fast_drive: false,
+            tlk_fast_drive_path: None,
+            override_fast_drive: false,
+            override_fast_drive_path: None,
+            pause_on_guard: false,
+            enable_biff_delete_optimization: false,
         }
     }
 

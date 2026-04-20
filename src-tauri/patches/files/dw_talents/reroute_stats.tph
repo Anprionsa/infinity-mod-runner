@@ -67,7 +67,8 @@ DEFINE_ACTION_FUNCTION reroute_stats BEGIN
 	OUTER_SET fs_stat=IDS_OF_SYMBOL (stats WIZARD_FIRE_SHIELD)
 	OUTER_SET si_stat=IDS_OF_SYMBOL (stats WIZARD_SPELL_IMMUNITY)
 	// _eetmr_bcs_safety: All DECOMPILE_AND_PATCH wrapped in PATCH_TRY for BCS round-trip safety
-	COPY_EXISTING_REGEXP ".*\.bcs" override
+	// _eetmr_glob_biff: GLOB added so biffed BCS files are still found after mid-install BIFF optimization
+	COPY_EXISTING_REGEXP GLOB ".*\.bcs" override
 		PATCH_IF NOT (~%SOURCE_RES%~ STRING_COMPARE_REGEXP ~BD.*~ = 0 OR ~%SOURCE_RES%~ STRING_EQUAL_CASE ~C#AJAN~ OR ~%SOURCE_RES%~ STRING_EQUAL_CASE ~A7!GXRU~) BEGIN
 		//chaotic commands
 		PATCH_IF INDEX_BUFFER (" %cc_stat% ")>=0 BEGIN

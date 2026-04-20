@@ -1,4 +1,4 @@
-/* EET Mod Runner — color scheme matching EET Mod Forge */
+/* Infinity Mod Runner — color scheme matching Infinity Mod Forge */
 :root {
   --bg: #0c0e14;
   --bg2: #141620;
@@ -23,16 +23,40 @@
   --bg-info: #10202a;
   --bg-ok: #1e3a2f;
   --tx-warn: #f0c050;
+
+  /* ─── Design tokens (spacing, typography scale, radius) ─── */
+  --sp-1: 4px; --sp-2: 8px; --sp-3: 12px; --sp-4: 16px; --sp-5: 24px; --sp-6: 32px;
+  --fs-xs: 10px; --fs-sm: 11px; --fs-md: 12px; --fs-base: 13px; --fs-lg: 14px; --fs-xl: 16px; --fs-2xl: 18px; --fs-3xl: 28px;
+  --radius: 4px;
+  --radius-lg: 8px;
+  --transition: 0.15s ease;
+  --modal-backdrop: rgba(0, 0, 0, 0.7);
+  --modal-backdrop-soft: rgba(0, 0, 0, 0.55);
+  /* Row tints — reused in Issues panel, Patch Details, any alternating
+     row layout. `--row-alt` is the even-row background; `--row-separator`
+     is the dashed separator between sibling rows. */
+  --row-alt: rgba(255, 255, 255, 0.02);
+  --row-separator: rgba(255, 255, 255, 0.04);
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
 
 body {
-  font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif;
+  font-family: 'Source Sans 3', 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif;
   background: var(--bg);
   color: var(--tx);
   overflow: hidden;
   height: 100vh;
+}
+
+/* ─── Forge-style heading typography (Cinzel serif display font) ─── */
+.panel h2,
+.panel-heading,
+.install-summary .summary-title,
+.splash-title,
+.modal .modal-title {
+  font-family: 'Cinzel', Georgia, serif;
+  letter-spacing: 0.3px;
 }
 
 #root {
@@ -70,6 +94,47 @@ body {
   border-bottom: 2px solid transparent;
   transition: color 0.15s, border-color 0.15s;
   letter-spacing: 0.3px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* ─── Tab status indicators (CSS-drawn so they center with the label
+       instead of riding on the font baseline) ─── */
+.tab-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  display: inline-block;
+  background: transparent;
+  border: 1.5px solid var(--txd);
+  box-sizing: border-box;
+  transition: background 0.15s, border-color 0.15s, box-shadow 0.15s;
+}
+.tab-dot.pending { background: transparent; border-color: var(--txd); }
+.tab-dot.done    { background: var(--grn);     border-color: var(--grn);     box-shadow: 0 0 6px rgba(74, 222, 128, 0.5); }
+.tab-dot.warn    { background: var(--tx-warn); border-color: var(--tx-warn); box-shadow: 0 0 6px rgba(240, 192, 80, 0.5); }
+.tab-dot.err     { background: var(--red);     border-color: var(--red);     box-shadow: 0 0 6px rgba(248, 113, 113, 0.5); }
+.tab-dot.active {
+  background: var(--gold);
+  border-color: var(--gold);
+  animation: tab-dot-pulse 1.5s ease-in-out infinite;
+}
+/* Guided-mode locked dot — visually distinct from pending (empty outline)
+ * so the user can see at a glance "this is a hard gate, not just unfinished."
+ * Dashed border reads as "temporarily unavailable" without needing a glyph
+ * that won't fit cleanly in 9×9px. */
+.tab-dot.locked {
+  background: transparent;
+  border-style: dashed;
+  border-color: var(--txd);
+  opacity: 0.6;
+  box-shadow: none;
+}
+@keyframes tab-dot-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(212, 168, 67, 0.6); }
+  50%      { box-shadow: 0 0 0 5px rgba(212, 168, 67, 0); }
 }
 .tab-bar button:hover { color: var(--tx); }
 .tab-bar button.active {
@@ -194,7 +259,7 @@ body {
   border: 1px solid var(--brd);
   border-radius: 4px;
   padding: 12px;
-  font-family: 'Cascadia Code', 'Consolas', monospace;
+  font-family: 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
   font-size: 12px;
   line-height: 1.5;
   max-height: 400px;
@@ -202,6 +267,15 @@ body {
   white-space: pre-wrap;
   word-break: break-all;
   color: var(--txd);
+}
+/* When .log-output is rendered inside a ResizablePanel (which forwards
+   className onto its inner scrolling div → class list becomes
+   "resizable-panel log-output"), the wrapper's own `height` controls the
+   size via flex. The 400px cap on the base class would otherwise clamp
+   the inner div and make "Fit" / the drag-handle appear to do nothing —
+   the wrapper grows but the content stays stuck at 400px. */
+.resizable-panel.log-output {
+  max-height: none;
 }
 .log-output .log-err { color: var(--red); }
 .log-output .log-warn { color: var(--org); }
@@ -305,9 +379,11 @@ body {
   margin-bottom: 16px;
 }
 .install-dashboard .current-mod {
-  font-size: 14px;
+  font-family: 'Cinzel', Georgia, serif;
+  font-size: 16px;
   color: var(--goldb);
-  font-weight: 600;
+  font-weight: 700;
+  letter-spacing: 0.3px;
   margin-bottom: 4px;
 }
 .install-dashboard .current-component {
@@ -329,6 +405,19 @@ body {
 .install-dashboard .stat .stat-num {
   font-weight: 700;
   font-size: 16px;
+}
+/* Zero-count stats (0 errors, 0 skipped) deserve to visually recede —
+ * the dim `var(--txd)` color alone wasn't enough because the 16px-bold
+ * number still caught the eye. Applying `.zero` on the .stat wrapper
+ * drops weight + size + opacity so a clean run visually *asserts* its
+ * cleanliness rather than crowding the row with equal-weighted "0"s. */
+.install-dashboard .stat.zero .stat-num {
+  font-weight: 400;
+  font-size: 13px;
+  opacity: 0.55;
+}
+.install-dashboard .stat.zero {
+  opacity: 0.7;
 }
 .install-dashboard .elapsed {
   font-size: 11px;
@@ -354,23 +443,51 @@ body {
   gap: 8px;
   font-size: 11px;
 }
-.error-timeline-header .badge {
-  padding: 2px 8px;
+/* Filter buttons (replace decorative badges).
+   Inactive (when any filter is on but this one isn't) = dimmed. */
+.error-timeline-header .filter-btn {
+  padding: 2px 10px;
   border-radius: 10px;
   font-weight: 600;
+  font-size: 11px;
+  border: 1px solid transparent;
+  cursor: pointer;
+  user-select: none;
+  transition: opacity 0.12s, border-color 0.12s;
 }
-.error-timeline-header .badge.errors {
+.error-timeline-header .filter-btn:hover {
+  border-color: var(--brd2);
+}
+.error-timeline-header .filter-btn.dimmed {
+  opacity: 0.4;
+}
+.error-timeline-header .filter-btn.all {
+  background: var(--bg2);
+  color: var(--tx);
+  border-color: var(--brd2);
+}
+.error-timeline-header .filter-btn.all.active {
+  background: var(--gold-dim, rgba(255,180,40,0.18));
+  color: var(--gold);
+  border-color: var(--gold);
+}
+.error-timeline-header .filter-btn.errors {
   background: var(--bg-err);
   color: var(--red);
 }
-.error-timeline-header .badge.warnings {
+.error-timeline-header .filter-btn.warnings {
   background: var(--bg-warn);
   color: var(--tx-warn);
 }
-.error-timeline-header .badge.skipped {
+.error-timeline-header .filter-btn.skipped {
   background: var(--bg2);
   color: var(--txd);
 }
+.error-timeline-header .filter-btn.retry {
+  background: var(--bg-info);
+  color: var(--cyn);
+}
+
 .error-timeline-list {
   max-height: 250px;
   overflow-y: auto;
@@ -378,54 +495,126 @@ body {
   flex-direction: column;
   gap: 4px;
 }
-.error-entry {
-  padding: 8px 12px;
+
+/* Issues row — fixed columns so every row aligns vertically.
+   Cols: time | arrow | mod (display name + tp2 chip) | message | level tag. */
+.issues-row {
+  display: grid;
+  grid-template-columns: 70px 16px minmax(180px, 1.4fr) minmax(0, 2fr) 76px;
+  gap: 10px;
+  align-items: center;
+  padding: 6px 12px;
   border-radius: 4px;
   border-left: 3px solid var(--brd);
   background: var(--bg2);
   font-size: 12px;
-  display: flex;
-  gap: 10px;
-  align-items: flex-start;
+  cursor: pointer;
+  user-select: none;
 }
-.error-entry .entry-time {
+.issues-row .col-time {
   color: var(--txd);
   font-size: 10px;
   white-space: nowrap;
-  min-width: 50px;
-  padding-top: 1px;
 }
-.error-entry .entry-mod {
+.issues-row .col-arrow {
+  color: var(--txd);
+  font-size: 10px;
+  text-align: center;
+}
+.issues-row .col-mod {
   color: var(--gold);
   font-weight: 600;
   white-space: nowrap;
-  min-width: 100px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
 }
-.error-entry .entry-msg {
+.issues-row .col-mod .tp2 {
+  color: var(--txd);
+  font-weight: 400;
+  font-size: 10px;
+  margin-left: 5px;
+}
+.issues-row .col-msg {
   color: var(--tx);
-  flex: 1;
-  word-break: break-word;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  overflow: hidden;
 }
-.error-entry.level-error {
+.issues-row .col-msg .msg-text {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.issues-row .col-msg .msg-badge {
+  flex-shrink: 0;
+}
+.issues-row .col-tag {
+  font-size: 10px;
+  font-weight: 600;
+  text-align: right;
+  letter-spacing: 0.5px;
+}
+.issues-row.level-error {
   border-left-color: var(--red);
   background: var(--bg-err);
 }
-.error-entry.level-error .entry-msg { color: var(--red); }
-.error-entry.level-warn {
+.issues-row.level-error .col-msg,
+.issues-row.level-error .col-tag { color: var(--red); }
+.issues-row.level-warn {
   border-left-color: var(--org);
   background: var(--bg-warn);
 }
-.error-entry.level-warn .entry-msg { color: var(--tx-warn); }
-.error-entry.level-skip {
+.issues-row.level-warn .col-msg,
+.issues-row.level-warn .col-tag { color: var(--tx-warn); }
+.issues-row.level-skip {
   border-left-color: var(--txd);
   background: var(--bg2);
-  opacity: 0.7;
+  opacity: 0.85;
 }
-.error-entry.level-retry {
+.issues-row.level-skip .col-tag { color: var(--txd); }
+.issues-row.level-retry {
   border-left-color: var(--cyn);
   background: var(--bg-info);
 }
-.error-entry.level-retry .entry-msg { color: var(--cyn); }
+.issues-row.level-retry .col-msg,
+.issues-row.level-retry .col-tag { color: var(--cyn); }
+
+/* Child rows — same columns, indented under the group header. */
+.issues-child {
+  display: grid;
+  grid-template-columns: 70px 16px minmax(180px, 1.4fr) minmax(0, 2fr) 76px;
+  gap: 10px;
+  align-items: center;
+  padding: 3px 12px 3px 24px;
+  font-size: 11px;
+  background: var(--bg);
+  border-left: 2px solid var(--brd2);
+  margin-left: 8px;
+}
+.issues-child .col-time { color: var(--txd); font-size: 9px; white-space: nowrap; }
+.issues-child .col-msg {
+  color: var(--tx);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  /* Span across the mod + message columns since child rows have no per-mod
+   * label of their own (they belong to the parent group). */
+  grid-column: 3 / 5;
+}
+.issues-child .col-tag { font-size: 9px; font-weight: 600; text-align: right; letter-spacing: 0.5px; }
+.issues-child.level-error .col-msg,
+.issues-child.level-error .col-tag { color: var(--red); }
+.issues-child.level-warn .col-msg,
+.issues-child.level-warn .col-tag { color: var(--tx-warn); }
+.issues-child.level-skip .col-msg { color: var(--txd); }
+.issues-child.level-skip .col-tag { color: var(--txd); }
+.issues-child.level-retry .col-msg,
+.issues-child.level-retry .col-tag { color: var(--cyn); }
 
 /* ─── Collapsible Log ─── */
 .log-toggle {
@@ -512,6 +701,472 @@ body {
 @keyframes pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.3; }
+}
+
+/* ─── Shared animations (ported from Forge) ─── */
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+@keyframes fi {
+  from { opacity: 0; transform: translateY(-4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* ─── Loading ring (ported from Forge .loading-ring) ─── */
+.loading-ring {
+  width: 40px;
+  height: 40px;
+  border: 3px solid var(--brd);
+  border-top-color: var(--gold);
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+}
+
+/* ─── Modal / Modal backdrop ─── */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: var(--modal-backdrop);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  animation: fi var(--transition);
+}
+.modal {
+  background: var(--bg2);
+  border: 1px solid var(--brd2);
+  border-radius: var(--radius-lg);
+  padding: var(--sp-5);
+  max-width: 450px;
+  text-align: center;
+  animation: fi var(--transition);
+}
+.modal.narrow { max-width: 400px; }
+.modal .modal-title {
+  font-size: var(--fs-xl);
+  font-weight: 600;
+  margin-bottom: var(--sp-3);
+  color: var(--txb);
+}
+.modal .modal-body {
+  font-size: var(--fs-base);
+  color: var(--tx);
+  margin-bottom: var(--sp-4);
+  line-height: 1.5;
+}
+.modal .modal-actions {
+  display: flex;
+  gap: var(--sp-3);
+  justify-content: center;
+}
+
+/* ─── Badges ─── */
+.badge {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  background: var(--bg3);
+  color: var(--txd);
+  border: 1px solid var(--brd2);
+}
+.badge.success { background: var(--bg-ok);   color: var(--grn);      border-color: var(--brd2); }
+.badge.warn    { background: var(--bg-warn); color: var(--tx-warn);  border-color: var(--brd2); }
+.badge.err     { background: var(--bg-err);  color: var(--red);      border-color: var(--brd2); }
+.badge.info    { background: var(--bg-info); color: var(--blu);      border-color: var(--brd2); }
+.badge.neutral { background: var(--bg3);     color: var(--tx);       border-color: var(--brd2); }
+/* Patch category semantic variants — reuse the palette tokens but pair
+   category → color in one place so ReadyCheck doesn't have to know which
+   color goes with which category. */
+.badge.cat-required    { background: var(--bg-err);  color: var(--red);     border-color: var(--brd2); }
+.badge.cat-bugfix      { background: var(--bg-warn); color: var(--tx-warn); border-color: var(--brd2); }
+.badge.cat-compat      { background: var(--bg-info); color: var(--cyn);     border-color: var(--brd2); }
+.badge.cat-performance { background: rgba(160, 120, 255, 0.12); color: var(--pur); border-color: var(--brd2); }
+.badge.cat-cosmetic    { background: var(--bg3);     color: var(--tx);      border-color: var(--brd2); }
+
+/* ─── Alerts (visual alias of .msg, kept for Forge vocabulary parity) ─── */
+.alert {
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--radius);
+  font-size: var(--fs-md);
+  margin-bottom: var(--sp-2);
+  border-left: 3px solid;
+}
+.alert.err  { background: var(--bg-err);  border-color: var(--red);     color: var(--red); }
+.alert.warn { background: var(--bg-warn); border-color: var(--org);     color: var(--tx-warn); }
+.alert.info { background: var(--bg-info); border-color: var(--blu);     color: var(--blu); }
+.alert.ok   { background: var(--bg-ok);   border-color: var(--grn);     color: var(--grn); }
+
+/* ─── Transition banner (Phase 13) ───
+ * Pinned at the top of the NEXT tab when the previous tab's work just
+ * completed (Setup valid → Mods banner; Mods imported → Ready Check
+ * banner; Ready Check passed → Install banner). Per-session state only;
+ * dismissing doesn't persist across restarts — a returning user whose
+ * pipeline is already green doesn't see these because no transition
+ * fires on launch.
+ *
+ * Visual: green left border + subtle green-tinted bg so it reads as
+ * "positive progress signal" distinct from the gold `.phase-banner`
+ * (neutral info) and `.msg.ok` (state indicator). */
+.transition-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  margin-bottom: 12px;
+  background: var(--bg-ok);
+  border: 1px solid var(--brd);
+  border-left: 3px solid var(--grn);
+  border-radius: var(--radius);
+  animation: fi 0.3s ease;
+  font-size: 13px;
+  color: var(--tx);
+}
+.transition-banner .tb-copy { flex: 1; line-height: 1.4; }
+.transition-banner .tb-copy strong { color: var(--grn); font-weight: 600; }
+.transition-banner .tb-actions { display: flex; gap: 6px; flex-shrink: 0; }
+.transition-banner .tb-dismiss {
+  background: transparent;
+  border: none;
+  color: var(--txd);
+  cursor: pointer;
+  padding: 4px 8px;
+  font-size: 11px;
+}
+.transition-banner .tb-dismiss:hover { color: var(--tx); }
+
+/* ─── Custom checkbox (ported from Forge .ck) ─── */
+.checkbox {
+  appearance: none;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  width: 16px;
+  height: 16px;
+  border: 1.5px solid var(--brd2);
+  background: transparent;
+  border-radius: 3px;
+  cursor: pointer;
+  position: relative;
+  flex-shrink: 0;
+  transition: background var(--transition), border-color var(--transition);
+  vertical-align: middle;
+  margin: 0;
+}
+.checkbox:hover:not(:disabled) { border-color: var(--goldd); }
+.checkbox:checked {
+  background: var(--gold);
+  border-color: var(--gold);
+}
+.checkbox:checked::after {
+  content: '';
+  position: absolute;
+  left: 4px;
+  top: 0;
+  width: 5px;
+  height: 10px;
+  border: solid var(--bg);
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+.checkbox:indeterminate {
+  background: var(--goldd);
+  border-color: var(--goldd);
+}
+.checkbox:indeterminate::after {
+  content: '';
+  position: absolute;
+  left: 3px;
+  top: 6px;
+  width: 8px;
+  height: 2px;
+  background: var(--bg);
+}
+.checkbox:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.checkbox:focus-visible {
+  outline: 2px solid var(--goldd);
+  outline-offset: 1px;
+}
+
+/* ─── Segmented control (ported from Forge .planner-mode-btns) ─── */
+.segmented {
+  display: inline-flex;
+  gap: 0;
+  border: 1px solid var(--brd);
+  border-radius: var(--radius);
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.segmented-btn {
+  padding: 4px 14px;
+  font-size: var(--fs-md);
+  font-family: inherit;
+  cursor: pointer;
+  background: var(--bg);
+  color: var(--txd);
+  border: none;
+  border-right: 1px solid var(--brd);
+  transition: all var(--transition);
+  letter-spacing: 0.3px;
+}
+.segmented-btn:last-child { border-right: none; }
+.segmented-btn.ac {
+  background: var(--goldd);
+  color: var(--bg);
+  font-weight: 600;
+}
+.segmented-btn:hover:not(.ac):not(:disabled) {
+  background: var(--bg3);
+  color: var(--tx);
+}
+.segmented-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* ─── Settings rows (Install tab option grid) ─── */
+.settings-group {
+  margin-bottom: var(--sp-5);
+}
+.settings-group-title {
+  font-family: 'Cinzel', Georgia, serif;
+  font-size: var(--fs-lg);
+  color: var(--gold);
+  letter-spacing: 0.5px;
+  margin-bottom: var(--sp-1);
+}
+.settings-group-desc {
+  font-size: var(--fs-sm);
+  color: var(--txd);
+  margin-bottom: var(--sp-3);
+}
+.settings-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: var(--sp-4);
+  align-items: center;
+  padding: var(--sp-2) var(--sp-3);
+  border-bottom: 1px solid var(--brd);
+}
+.settings-row:last-child { border-bottom: none; }
+.settings-row:nth-child(even) { background: rgba(255,255,255,0.015); }
+.settings-row .settings-label {
+  font-size: var(--fs-base);
+  color: var(--tx);
+  line-height: 1.35;
+}
+.settings-row .settings-hint {
+  font-size: var(--fs-sm);
+  color: var(--txd);
+  margin-top: 2px;
+  line-height: 1.35;
+}
+.settings-row .settings-control {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  justify-content: flex-end;
+}
+.settings-row input[type="text"],
+.settings-row input[type="number"] {
+  background: var(--bg2);
+  border: 1px solid var(--brd);
+  color: var(--tx);
+  padding: 4px 8px;
+  border-radius: var(--radius);
+  font-size: var(--fs-base);
+  outline: none;
+  font-family: inherit;
+}
+.settings-row input:focus { border-color: var(--goldd); }
+/* Hide native number spinner arrows — users type the value; arrows clash
+   with the gold/dark palette and are easy to mis-click. */
+.settings-row input[type="number"]::-webkit-outer-spin-button,
+.settings-row input[type="number"]::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+.settings-row input[type="number"] {
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+.settings-row .settings-suffix {
+  font-size: var(--fs-sm);
+  color: var(--txd);
+}
+/* Dropdown arrow for <select> in settings rows — replace the browser default
+   with our gold chevron and a matching focus ring. */
+.settings-row select {
+  appearance: none;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 8'><path d='M1 1l5 5 5-5' stroke='%23d4a843' stroke-width='1.5' fill='none'/></svg>");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  background-size: 10px 6px;
+  padding-right: 28px !important;
+}
+.settings-row select:focus { border-color: var(--goldd); outline: none; }
+
+/* ─── Phase banner ─────────────────────────────────────────────────────
+   Horizontal banner with a soft color-wash gradient and thin top/bottom
+   borders. Used to mark major section boundaries (EET phase, PRE-EET
+   phase, Ready Check state, Install phase title). Variants are just
+   a color recolor — same structure.
+*/
+.phase-banner {
+  text-align: center;
+  padding: 6px 0;
+  margin: 8px 0;
+  border-radius: 6px;
+  font-size: var(--fs-sm);
+  font-weight: 700;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  /* Each variant sets --phase-tint (rgb triplet, no parens) and
+     optionally --phase-fg + --phase-edge for non-default contrast. */
+  background: linear-gradient(90deg,
+    transparent,
+    rgba(var(--phase-tint, 255, 180, 40), 0.12),
+    transparent);
+  border-top: 1px solid rgba(var(--phase-tint, 255, 180, 40), 0.3);
+  border-bottom: 1px solid rgba(var(--phase-tint, 255, 180, 40), 0.3);
+  color: var(--phase-fg, var(--gold));
+}
+.phase-banner.gold   { --phase-tint: 255, 180, 40;  --phase-fg: var(--gold); }
+.phase-banner.cyan   { --phase-tint: 0, 200, 255;    --phase-fg: var(--cyn); }
+.phase-banner.green  { --phase-tint: 40, 220, 100;   --phase-fg: var(--grn); }
+.phase-banner.red    { --phase-tint: 255, 60, 60;    --phase-fg: var(--red); }
+.phase-banner.purple { --phase-tint: 160, 120, 255;  --phase-fg: var(--pur); }
+.phase-banner .phase-banner-sub {
+  display: block;
+  font-size: var(--fs-xs);
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--txd);
+  margin-top: 2px;
+}
+
+/* ─── Bottom action bar (ported from Forge .bb) ─── */
+.bottom-bar {
+  position: sticky;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  padding: var(--sp-3) var(--sp-5);
+  background: var(--bgs);
+  border-top: 1px solid var(--brd2);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-4);
+  margin: var(--sp-5) calc(-1 * var(--sp-6)) calc(-1 * var(--sp-5));
+  z-index: 10;
+}
+.bottom-bar .bar-info {
+  font-size: var(--fs-md);
+  color: var(--txd);
+  flex: 1;
+  min-width: 0;
+}
+.bottom-bar .bar-actions {
+  display: flex;
+  gap: var(--sp-2);
+}
+.bottom-bar .btn-primary {
+  padding: 8px 22px;
+  font-size: var(--fs-base);
+}
+
+/* ─── Reusable tooltip (ported from Forge `Tip`) ───────────────────────
+   Portal-rendered via fixed positioning — escapes stacking contexts and
+   overflow clipping so it works inside scroll panels, modals, tables.
+   Arrow tracks the anchor even when the box is clamped into the viewport
+   (via --tip-arrow-offset). Structured content slots: .tip-title /
+   .tip-meta / .tip-desc / .tip-warn.
+*/
+.ui-tip-host { display: inline-block; }
+.ui-tip-float {
+  --tip-bg-top: #1a1510;
+  --tip-bg-bottom: #12100e;
+  --tip-border: var(--goldd);
+  position: fixed;
+  z-index: 9999;
+  background: linear-gradient(180deg, var(--tip-bg-top) 0%, var(--tip-bg-bottom) 100%);
+  border: 1px solid var(--tip-border);
+  border-radius: 4px;
+  padding: 8px 10px;
+  pointer-events: none;
+  font-size: 12px;
+  color: var(--tx);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.8), 0 0 0 1px rgba(212, 168, 67, 0.1);
+  max-width: 320px;
+  min-width: 160px;
+  white-space: normal;
+  line-height: 1.35;
+  text-align: left;
+  animation: ui-tip-in 0.12s ease-out;
+}
+.ui-tip-float.ui-tip-top { transform: translate(-50%, -100%); }
+.ui-tip-float.ui-tip-bottom { transform: translate(-50%, 0); }
+/* Arrow anchored at horizontal center + --tip-arrow-offset (px).
+   Outer ::before = border color, inner ::after = fill matching gradient stops. */
+.ui-tip-float::before,
+.ui-tip-float::after {
+  content: '';
+  position: absolute;
+  left: calc(50% + var(--tip-arrow-offset, 0px));
+  transform: translateX(-50%);
+  border: 7px solid transparent;
+  pointer-events: none;
+}
+.ui-tip-float.ui-tip-top::before { top: 100%; border-top-color: var(--tip-border); }
+.ui-tip-float.ui-tip-top::after {
+  top: calc(100% - 1.5px);
+  border: 6px solid transparent;
+  border-top-color: var(--tip-bg-bottom);
+}
+.ui-tip-float.ui-tip-bottom::before { bottom: 100%; border-bottom-color: var(--tip-border); }
+.ui-tip-float.ui-tip-bottom::after {
+  bottom: calc(100% - 1.5px);
+  border: 6px solid transparent;
+  border-bottom-color: var(--tip-bg-top);
+}
+@keyframes ui-tip-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+@media (max-width: 400px) {
+  .ui-tip-float { max-width: calc(100vw - 24px); min-width: 0; }
+}
+.ui-tip-float .tip-title {
+  color: var(--gold);
+  font-weight: 600;
+  font-family: 'Cinzel', Georgia, serif;
+  font-size: 13px;
+  margin-bottom: 3px;
+  display: block;
+}
+.ui-tip-float .tip-meta {
+  color: var(--cyn);
+  font-size: 11px;
+  margin-bottom: 3px;
+  display: block;
+}
+.ui-tip-float .tip-desc {
+  color: var(--txd);
+  font-size: 11px;
+  display: block;
+}
+.ui-tip-float .tip-warn {
+  color: var(--org);
+  font-weight: 600;
+  margin-top: 4px;
+  display: block;
 }
 
 /* ─── Scrollbar ─── */

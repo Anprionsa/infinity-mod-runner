@@ -2,11 +2,18 @@ import { useState, useMemo, useCallback, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import PresetBrowser from "./PresetBrowser";
 import { DEFAULT_FORGE_URL } from "../App";
-import type { AppConfig, ParsedLog, LogEntry, ExcludeKey, PausePoint, DownloadReadiness, InstallStatusMap } from "../App";
+import type { AppConfig, ParsedLog, LogEntry, ExcludeKey, PausePoint, DownloadReadiness, InstallStatusMap, InstallIssueMap, Tab } from "../App";
 import { pickFile, readFileContents } from "../lib/tauri-bridge";
 import { buildParsedLog, parseWeiduLog } from "../lib/log-parser";
-import { fetchModIndex, type ModIndexEntry } from "../lib/forge-data";
+import { fetchModIndex, fetchVersionCache, fetchCategories, type ModIndexEntry } from "../lib/forge-data";
+import { FALLBACK_CATEGORY_DISPLAY_ORDER } from "../constants/categories";
+import { APP_VERSION } from "../constants/version";
+import Tip from "./Tip";
+import EmptyState from "./EmptyState";
+import TransitionBanner from "./TransitionBanner";
+import { FORGE_WEB_URL } from "../constants/forge";
 import { guiLog } from "../lib/gui-logger";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { useI18n } from "../lib/i18n";
 
 interface Props {
@@ -22,6 +29,20 @@ interface Props {
   onReadinessChange?: (readiness: DownloadReadiness) => void;
   installRunning?: boolean;
   installStatus?: InstallStatusMap;
+  installIssues?: InstallIssueMap;
+  /** Increment from App's footer refresh button to trigger a cache-busting
+   * re-fetch of mods-index + version_cache. The footer owns the visible
+   * refresh affordance now; this prop is the bridge. */
+  forgeRefreshTrigger?: number;
+  onForgeRefreshComplete?: () => void;
+  /** Cross-tab navigation for empty-state jumps ("Go to Setup", etc.). */
+  onGoToTab?: (tab: Tab) => void;
+  /** Per-session transition banner — true when Setup just turned valid
+   * and the user hasn't dismissed the banner. */
+  showSetupDoneBanner?: boolean;
+  onDismissSetupDoneBanner?: () => void;
+  /** Phase 14: show the guided-mode Next button at panel bottom. */
+  guidedMode?: boolean;
 }
 
 function makeKey(entry: LogEntry): ExcludeKey {
@@ -30,7 +51,15 @@ function makeKey(entry: LogEntry): ExcludeKey {
 
 // ─── Enrichment types ───
 
-interface ComponentInfo { cn: number; name: string; description: string }
+interface ComponentInfo {
+  cn: number;
+  name: string;
+  description: string;
+  /** Deprecated marker from Forge's per-mod data. `true` = deprecated without
+   * a reason; string = deprecated with the author's reason (often points at
+   * the replacement). Falsy = not deprecated. */
+  deprecated: boolean | string | null;
+}
 
 interface ModEnrichment {
   displayName: string;
@@ -74,20 +103,7 @@ function groupByMod(entries: LogEntry[], enrichment: Map<string, ModEnrichment>,
   return groups;
 }
 
-/** Defined category install order — matches Forge's categories.json */
-const CATEGORY_DISPLAY_ORDER: string[] = [
-  "PRE EET BGEE MODS", "EET STARTS HERE", "ENGINE", "INTERFACE",
-  "GRAPHICAL AND SOUND OVERWRITE MODS", "RESTORATIONS",
-  "QUEST MODS BG1", "QUEST MODS BG2", "QUEST MODS ToB",
-  "NEW NPC MODS", "NPC EXPANSIONS", "NPC CROSSMOD", "CREATURE MODS",
-  "ITEM ADDITION MODS", "SPELL MODS", "KIT & CLASS MODS",
-  "PRE-TACTICAL TWEAKS", "TACTICAL MODS", "POST-TACTICAL TWEAKS",
-  "NPC CUSTOMIZATION", "POST-TACTICAL QUESTS",
-  "MUSIC & AUDIO", "PORTRAITS", "EET FINALIZATION", "POST EET",
-];
-const CATEGORY_ORDER_MAP = new Map(CATEGORY_DISPLAY_ORDER.map((c, i) => [c, i]));
-
-function groupByCategory(groups: ModGroup[]): CategorySection[] {
+function groupByCategory(groups: ModGroup[], orderMap: Map<string, number>): CategorySection[] {
   const map = new Map<string, CategorySection>();
   for (const g of groups) {
     let section = map.get(g.category);
@@ -97,11 +113,10 @@ function groupByCategory(groups: ModGroup[]): CategorySection[] {
     }
     section.groups.push(g);
   }
-  // Sort by defined category order
   const sections = [...map.values()];
   sections.sort((a, b) => {
-    const ai = CATEGORY_ORDER_MAP.get(a.name) ?? 999;
-    const bi = CATEGORY_ORDER_MAP.get(b.name) ?? 999;
+    const ai = orderMap.get(a.name) ?? 999;
+    const bi = orderMap.get(b.name) ?? 999;
     return ai - bi;
   });
   return sections;
@@ -114,7 +129,11 @@ export default function ModsPanel({
   excludedComponents, onExcludedChange,
   pausePoints, onPausePointsChange,
   forgeOnline, onReadinessChange,
-  installRunning, installStatus,
+  installRunning, installStatus, installIssues,
+  forgeRefreshTrigger, onForgeRefreshComplete,
+  onGoToTab,
+  showSetupDoneBanner, onDismissSetupDoneBanner,
+  guidedMode,
 }: Props) {
   const { t } = useI18n();
   const locked = !!installRunning;
@@ -126,6 +145,8 @@ export default function ModsPanel({
   const [enrichment, setEnrichment] = useState<Map<string, ModEnrichment>>(new Map());
   const [enrichmentLoaded, setEnrichmentLoaded] = useState(false);
   const [enrichmentStep, setEnrichmentStep] = useState("");
+  // Refresh state + age tick now live in the footer (App.tsx) — this panel
+  // just reacts to `forgeRefreshTrigger` changes.
 
   // ── Preset browser state ──
   const [presetBrowserOpen, setPresetBrowserOpen] = useState(false);
@@ -138,6 +159,20 @@ export default function ModsPanel({
 
   // ── Mod existence check (are mods on disk?) ──
   const [modExistence, setModExistence] = useState<Map<string, boolean>>(new Map());
+
+  // ── Category install order — Forge-hosted with local fallback ──
+  const [categoryOrder, setCategoryOrder] = useState<string[]>(FALLBACK_CATEGORY_DISPLAY_ORDER);
+  useEffect(() => {
+    let cancelled = false;
+    fetchCategories(config.forge_data_url || DEFAULT_FORGE_URL)
+      .then((names) => { if (!cancelled) setCategoryOrder(names); })
+      .catch(() => { /* keep fallback */ });
+    return () => { cancelled = true; };
+  }, [config.forge_data_url]);
+  const categoryOrderMap = useMemo(
+    () => new Map(categoryOrder.map((c, i) => [c, i])),
+    [categoryOrder],
+  );
 
   // Check mod existence after parsedLog changes
   useEffect(() => {
@@ -228,12 +263,14 @@ export default function ModsPanel({
   }, [onImport, onSaveConfig, config, parsedLog]);
 
   // ── Enrichment fetch ──
-  const loadEnrichment = useCallback(async () => {
+  // `bustCache` is set by the manual Refresh button; default path on first
+  // mount uses browser cache (cheap, fast). Refresh forces a revalidation.
+  const loadEnrichment = useCallback(async (bustCache = false) => {
     if (!forgeOnline || !parsedLog) return;
     const baseUrl = config.forge_data_url || DEFAULT_FORGE_URL;
     setEnrichmentStep("Loading mod data from Forge...");
     try {
-      const modIndex = await fetchModIndex(baseUrl);
+      const modIndex = await fetchModIndex(baseUrl, { bustCache });
       const indexArr = Array.isArray(modIndex) ? modIndex : Object.values(modIndex);
       const map = new Map<string, ModEnrichment>();
 
@@ -307,10 +344,15 @@ export default function ModsPanel({
           const { tp2, data } = r.value;
           const existing = map.get(tp2);
           if (!existing) continue;
-          const co = (data.co || []) as { cn?: number; n?: string; no?: string }[];
+          const co = (data.co || []) as { cn?: number; n?: string; no?: string; dep?: boolean | string }[];
           for (const comp of co) {
             if (comp.cn !== undefined) {
-              existing.components.set(comp.cn, { cn: comp.cn, name: comp.n || "", description: comp.no || "" });
+              existing.components.set(comp.cn, {
+                cn: comp.cn,
+                name: comp.n || "",
+                description: comp.no || "",
+                deprecated: comp.dep ?? null,
+              });
             }
           }
         }
@@ -332,6 +374,117 @@ export default function ModsPanel({
       loadEnrichment();
     }
   }, [forgeOnline, parsedLog, enrichmentLoaded, loadEnrichment]);
+
+  // ── Deprecated component auto-skip ──
+  // When enrichment arrives, auto-add any component whose Forge entry has
+  // truthy `dep` to the excludedComponents set. Tracked separately in
+  // `deprecatedAutoSkipped` so the UI can show the muted / DEP-badge
+  // treatment AND so the user can "Include anyway" to override — which
+  // removes the key from both sets so it participates in the install.
+  const [deprecatedAutoSkipped, setDeprecatedAutoSkipped] = useState<Set<ExcludeKey>>(new Set());
+  const [userIncludedDeprecated, setUserIncludedDeprecated] = useState<Set<ExcludeKey>>(new Set());
+  useEffect(() => {
+    if (!enrichmentLoaded || !parsedLog) return;
+    const allEntries = [...(parsedLog.bgeeEntries || []), ...parsedLog.entries];
+    const newlyDeprecated = new Set<ExcludeKey>();
+    const addToExcluded: ExcludeKey[] = [];
+    for (const e of allEntries) {
+      const info = enrichment.get(e.mod_name);
+      if (!info) continue;
+      const comp = info.components.get(parseInt(e.component, 10));
+      if (!comp || !comp.deprecated) continue;
+      const key = makeKey(e);
+      newlyDeprecated.add(key);
+      // Only auto-add if user hasn't explicitly opted back in for this key.
+      if (!userIncludedDeprecated.has(key) && !excludedComponents.has(key)) {
+        addToExcluded.push(key);
+      }
+    }
+    if (newlyDeprecated.size !== deprecatedAutoSkipped.size ||
+        [...newlyDeprecated].some((k) => !deprecatedAutoSkipped.has(k))) {
+      setDeprecatedAutoSkipped(newlyDeprecated);
+    }
+    if (addToExcluded.length > 0) {
+      const next = new Set(excludedComponents);
+      for (const k of addToExcluded) next.add(k);
+      onExcludedChange(next);
+      guiLog.info("UI", `Auto-skipped ${addToExcluded.length} deprecated component(s) on enrichment load`);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [enrichmentLoaded, enrichment, parsedLog]);
+
+  const includeDeprecatedAnyway = useCallback((entry: LogEntry) => {
+    const key = makeKey(entry);
+    const nextIncluded = new Set(userIncludedDeprecated);
+    nextIncluded.add(key);
+    setUserIncludedDeprecated(nextIncluded);
+    const nextExcluded = new Set(excludedComponents);
+    nextExcluded.delete(key);
+    onExcludedChange(nextExcluded);
+    guiLog.info("UI", `User overrode deprecation for ${key}`);
+  }, [userIncludedDeprecated, excludedComponents, onExcludedChange]);
+
+  // Footer-driven refresh — App.tsx increments `forgeRefreshTrigger` when the
+  // user clicks the refresh icon next to "Forge Data: Connected". We re-fetch
+  // mods-index + version_cache with bustCache, then call back so the footer
+  // can clear its spinner state. Skips the initial mount (counter === 0) so
+  // we don't duplicate the auto-load.
+  useEffect(() => {
+    if (!forgeRefreshTrigger) return;
+    if (!forgeOnline) {
+      onForgeRefreshComplete?.();
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      guiLog.info("UI", "Manual Forge data refresh requested");
+      try {
+        const baseUrl = config.forge_data_url || DEFAULT_FORGE_URL;
+        // Re-pull both data files in parallel. mods-index drives enrichment;
+        // version_cache drives the (currently-disconnected) download builder
+        // — refreshing both keeps the helper future-proof for when downloads
+        // are re-wired without requiring another code change.
+        await Promise.all([
+          loadEnrichment(true),
+          fetchVersionCache(baseUrl, { bustCache: true }).catch(() => {/* version cache is optional */}),
+        ]);
+        guiLog.info("UI", "Manual Forge data refresh completed");
+      } catch (e) {
+        guiLog.warn("UI", `Manual Forge data refresh failed: ${e}`);
+      } finally {
+        if (!cancelled) onForgeRefreshComplete?.();
+      }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [forgeRefreshTrigger]);
+
+  // Open a pre-filled GitHub Issues URL so users can report a bad link or
+  // other mod-level problem without digging for the repo. The Forge is the
+  // source of truth for URLs, so issues land there. Every fix lands in
+  // data that the Runner pulls automatically — no Runner release needed.
+  const reportModIssue = useCallback((modName: string, displayName: string) => {
+    const info = enrichment.get(modName.toLowerCase());
+    const currentUrl = info?.url || "(no URL in Forge data)";
+    const title = encodeURIComponent(`[link-issue] ${displayName} (${modName})`);
+    const body = encodeURIComponent([
+      `**Mod**: ${displayName}`,
+      `**tp2 name**: \`${modName}\``,
+      `**Current URL in Forge**: ${currentUrl}`,
+      ``,
+      `**What's wrong?** (broken link, wrong version, 404, moved repo, etc.)`,
+      ``,
+      ``,
+      `**Corrected URL / tag / branch** (if known):`,
+      ``,
+      ``,
+      `---`,
+      `_Reported from Infinity Mod Runner v${APP_VERSION}_`,
+    ].join("\n"));
+    const url = `https://github.com/Anprionsa/infinity-mod-forge/issues/new?title=${title}&body=${body}&labels=link-issue`;
+    openUrl(url).catch((e) => guiLog.warn("UI", `Failed to open issue URL: ${e}`));
+    guiLog.info("UI", `Report-issue opened for ${modName}`);
+  }, [enrichment]);
 
   // ── Grouped data ──
   const bgeeGroups = useMemo(() => groupByMod(parsedLog?.bgeeEntries || [], enrichment, modExistence), [parsedLog?.bgeeEntries, enrichment, modExistence]);
@@ -456,13 +609,42 @@ export default function ModsPanel({
     <div>
       <h2>{t("mods.heading", "Mods")}</h2>
 
+      {/* Transition banner — "Setup just went green, now import your list."
+       * Only shows during the session where Setup transitioned false→true;
+       * dismissed with × or by importing a log (which makes it redundant). */}
+      {showSetupDoneBanner && !parsedLog && onDismissSetupDoneBanner && (
+        <TransitionBanner
+          headline={t("banner.setup_done_headline", "Setup complete.")}
+          body={t("banner.setup_done_body", "Import your mod list below to continue.")}
+          secondary={[{
+            label: `${t("banner.open_forge", "Open Forge")} \u2192`,
+            onClick: () => { openUrl(FORGE_WEB_URL).catch((e) => guiLog.warn("UI", `Failed to open Forge: ${e}`)); },
+          }]}
+          onDismiss={onDismissSetupDoneBanner}
+        />
+      )}
+
+      {/* First-time orientation — no log imported yet, no saved log path in
+       * config, and not locked by a running install. Tells the user what
+       * this tab is for and where the file they need comes from.
+       * Auto-dismisses the moment a log is imported (condition flips). */}
+      {!parsedLog && !config.eet_log_path && !locked && (
+        <EmptyState
+          title={t("mods.empty_title", "No mod list loaded yet")}
+          body={t(
+            "mods.empty_body",
+            "Runner needs a WeiDU.log describing which mods to install and in what order. You get one from Infinity Mod Forge \u2014 build your list there, click Export, and import the resulting WeiDU.log here.",
+          )}
+          actions={[
+            { label: `${t("mods.empty_open_forge", "Open Infinity Mod Forge")} \u2192`, onClick: () => { openUrl(FORGE_WEB_URL).catch((e) => guiLog.warn("UI", `Failed to open Forge: ${e}`)); } },
+            { label: t("mods.empty_import", "Import a WeiDU.log…"), onClick: () => importLog("eet"), primary: true },
+            { label: t("mods.empty_preset", "Load a saved preset…"), onClick: () => setPresetBrowserOpen(true) },
+          ]}
+        />
+      )}
+
       {locked && (
-        <div style={{
-          textAlign: "center", padding: "8px 0", marginBottom: 16, borderRadius: 6,
-          background: "linear-gradient(90deg, transparent, rgba(255,180,40,0.12), transparent)",
-          borderTop: "1px solid rgba(255,180,40,0.3)", borderBottom: "1px solid rgba(255,180,40,0.3)",
-          fontSize: 12, fontWeight: 600, color: "var(--gold)",
-        }}>
+        <div className="phase-banner gold" style={{ letterSpacing: 0, textTransform: "none", fontSize: 12 }}>
           {t("mods.locked", "Install in progress — mod list is locked")}
         </div>
       )}
@@ -470,7 +652,7 @@ export default function ModsPanel({
       {/* ── Import bar ── */}
       <div style={locked ? { pointerEvents: "none", opacity: 0.5 } : undefined}>
       <p style={{ color: "var(--txd)", marginBottom: 8, fontSize: 12 }}>
-        {t("mods.import_desc", "Import the WeiDU.log files exported from EET Mod Forge. The EET log is required. The BG1:EE log is optional (only needed if your install has a BG1 phase).")}
+        {t("mods.import_desc", "Import the WeiDU.log files exported from Infinity Mod Forge. The EET log is required. The BG1:EE log is optional (only needed if your install has a BG1 phase).")}
       </p>
       <div style={{ display: "flex", gap: 12, marginBottom: 12, alignItems: "center" }}>
         <div style={{ flex: 1 }}>
@@ -513,6 +695,8 @@ export default function ModsPanel({
       </div>
       {importError && <div className="msg err" style={{ marginBottom: 8, fontSize: 12 }}>{importError}</div>}
       {enrichmentStep && <div style={{ fontSize: 11, color: "var(--txd)", marginBottom: 8 }}>{enrichmentStep}</div>}
+      {/* Forge data age + manual refresh moved to footer (App.tsx).
+          See: forgeRefreshTrigger / onForgeRefreshComplete props. */}
       </div>{/* end import lock wrapper */}
 
       {!parsedLog && (
@@ -523,14 +707,11 @@ export default function ModsPanel({
         <>
           {/* ── Preset source banner ── */}
           {parsedLog.presetSource && (
-            <div style={{
-              display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
-              padding: "6px 12px", marginBottom: 8, borderRadius: 6,
-              background: "linear-gradient(90deg, transparent, rgba(160,120,255,0.1), transparent)",
-              borderTop: "1px solid rgba(160,120,255,0.25)", borderBottom: "1px solid rgba(160,120,255,0.25)",
-              fontSize: 12, color: "var(--tx)",
-            }}>
-              <span style={{ color: "rgba(160,120,255,0.8)", fontWeight: 600 }}>
+            <div
+              className="phase-banner purple"
+              style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, padding: "6px 12px", marginBottom: 8, fontSize: 12, letterSpacing: 0, textTransform: "none", fontWeight: 500, color: "var(--tx)" }}
+            >
+              <span style={{ color: "var(--pur)", fontWeight: 600 }}>
                 {parsedLog.presetSource.type === "build" ? t("mods.build_label", "Community Build:") : t("mods.preset_label", "Preset:")}
               </span>
               <span style={{ fontWeight: 500 }}>{parsedLog.presetSource.name}</span>
@@ -576,8 +757,13 @@ export default function ModsPanel({
             </select>
           </div>
 
-          {/* ── Column headers ── */}
-          <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 8px", fontSize: 10, fontWeight: 700, color: "var(--txb)", textTransform: "uppercase", letterSpacing: "1px", background: "var(--bg2)", borderBottom: "2px solid var(--brd)", marginBottom: 4, borderRadius: "4px 4px 0 0" }}>
+          {/* ── Column headers ──
+           * Phase 19i: `position: sticky` so the labels (#, Mod, Comps,
+           * Pause, Status) stay pinned to the top of the scroll viewport
+           * while the user scrolls through hundreds of mods. z-index
+           * keeps it above row content; background is opaque so rows
+           * scrolling underneath don't bleed through. */}
+          <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 8px", fontSize: 10, fontWeight: 700, color: "var(--txb)", textTransform: "uppercase", letterSpacing: "1px", background: "var(--bg2)", borderBottom: "2px solid var(--brd)", marginBottom: 4, borderRadius: "4px 4px 0 0", position: "sticky", top: 0, zIndex: 10 }}>
             <span style={{ width: 20 }}></span>
             <span style={{ width: 32 }}>#</span>
             <span style={{ flex: 1 }}>{t("mods.col_mod", "Mod")}</span>
@@ -593,7 +779,7 @@ export default function ModsPanel({
           {bgeeGroups.length > 0 && (
             <PhaseView
               phase="bgee"
-              sections={groupByCategory(filterGroups(bgeeGroups))}
+              sections={groupByCategory(filterGroups(bgeeGroups), categoryOrderMap)}
               allGroups={bgeeGroups}
               excludedComponents={excludedComponents} expandedMods={expandedMods}
               collapsedCategories={collapsedCategories}
@@ -602,7 +788,12 @@ export default function ModsPanel({
               onToggleExpand={toggleExpand} onToggleCategory={toggleCategory}
               onTogglePause={togglePause} onUpdatePauseMessage={updatePauseMessage}
               installStatus={installStatus}
+              installIssues={installIssues}
+              onReportMod={reportModIssue}
               locked={locked}
+              deprecatedAutoSkipped={deprecatedAutoSkipped}
+              userIncludedDeprecated={userIncludedDeprecated}
+              onIncludeDeprecated={includeDeprecatedAnyway}
             />
           )}
 
@@ -610,7 +801,7 @@ export default function ModsPanel({
           {eetGroups.length > 0 && (
             <PhaseView
               phase="eet"
-              sections={groupByCategory(filterGroups(eetGroups))}
+              sections={groupByCategory(filterGroups(eetGroups), categoryOrderMap)}
               allGroups={eetGroups}
               excludedComponents={excludedComponents} expandedMods={expandedMods}
               collapsedCategories={collapsedCategories}
@@ -619,10 +810,29 @@ export default function ModsPanel({
               onToggleExpand={toggleExpand} onToggleCategory={toggleCategory}
               onTogglePause={togglePause} onUpdatePauseMessage={updatePauseMessage}
               installStatus={installStatus}
+              installIssues={installIssues}
+              onReportMod={reportModIssue}
               locked={locked}
+              deprecatedAutoSkipped={deprecatedAutoSkipped}
+              userIncludedDeprecated={userIncludedDeprecated}
+              onIncludeDeprecated={includeDeprecatedAnyway}
             />
           )}
         </>
+      )}
+
+      {/* Guided-mode Next button (Phase 14) — visible only when guided
+       * mode is on AND a log is loaded. Jumps to Ready Check. */}
+      {guidedMode && parsedLog && onGoToTab && (
+        <div style={{ marginTop: 20, display: "flex", justifyContent: "flex-end" }}>
+          <button
+            className="btn btn-primary"
+            onClick={() => onGoToTab("preflight")}
+            style={{ fontSize: 13, padding: "6px 18px" }}
+          >
+            {t("mods.guided_next", "Next: Run the Ready Check")} {"\u2192"}
+          </button>
+        </div>
       )}
 
       {/* ── Preset Browser Modal ── */}
@@ -656,14 +866,20 @@ interface PhaseViewProps {
   onTogglePause: (globalIdx: number, phase: "bgee" | "eet") => void;
   onUpdatePauseMessage: (globalIdx: number, phase: "bgee" | "eet", message: string) => void;
   installStatus?: InstallStatusMap;
+  installIssues?: InstallIssueMap;
+  onReportMod?: (modName: string, displayName: string) => void;
   locked?: boolean;
+  deprecatedAutoSkipped: Set<ExcludeKey>;
+  userIncludedDeprecated: Set<ExcludeKey>;
+  onIncludeDeprecated: (entry: LogEntry) => void;
 }
 
 function PhaseView({
   phase, sections, allGroups, excludedComponents, expandedMods,
   collapsedCategories, enrichment, pausePoints,
   onToggleComponent, onToggleMod, onToggleExpand, onToggleCategory,
-  onTogglePause, onUpdatePauseMessage, installStatus, locked,
+  onTogglePause, onUpdatePauseMessage, installStatus, installIssues, onReportMod, locked,
+  deprecatedAutoSkipped, userIncludedDeprecated, onIncludeDeprecated,
 }: PhaseViewProps) {
   const { t } = useI18n();
   const totalComponents = allGroups.reduce((sum, g) => sum + g.entries.length, 0);
@@ -675,20 +891,11 @@ function PhaseView({
 
   return (
     <div style={{ marginBottom: 16 }}>
-      <div style={{
-        textAlign: "center", padding: "6px 0", margin: "8px 0", borderRadius: 6,
-        fontSize: 11, fontWeight: 700, letterSpacing: 1.5, textTransform: "uppercase",
-        background: phase === "bgee"
-          ? "linear-gradient(90deg, transparent, rgba(0,200,255,0.12), transparent)"
-          : "linear-gradient(90deg, transparent, rgba(255,180,40,0.12), transparent)",
-        color: phase === "bgee" ? "var(--cyn)" : "var(--gold)",
-        borderTop: `1px solid ${phase === "bgee" ? "rgba(0,200,255,0.3)" : "rgba(255,180,40,0.3)"}`,
-        borderBottom: `1px solid ${phase === "bgee" ? "rgba(0,200,255,0.3)" : "rgba(255,180,40,0.3)"}`,
-      }}>
+      <div className={`phase-banner ${phase === "bgee" ? "cyan" : "gold"}`}>
         <div>{phase === "bgee" ? t("mods.phase_pre_eet", "PRE-EET") : t("mods.phase_eet", "EET")}</div>
-        <div style={{ fontSize: 10, fontWeight: 400, letterSpacing: 0, textTransform: "none", color: "var(--txd)", marginTop: 2 }}>
+        <span className="phase-banner-sub">
           {allGroups.length} mods, {totalComponents} components
-        </div>
+        </span>
       </div>
 
       {sections.map((section) => {
@@ -733,12 +940,11 @@ function PhaseView({
                     }}
                     onClick={() => onToggleExpand(group.modName)}
                   >
-                    <input type="checkbox" checked={!allExcluded}
+                    <input className="checkbox" type="checkbox" checked={!allExcluded}
                       ref={(el) => { if (el) el.indeterminate = someExcluded && !allExcluded; }}
                       onChange={() => onToggleMod(group)}
                       onClick={(e) => e.stopPropagation()}
                       disabled={locked}
-                      style={{ width: 14, height: 14, flexShrink: 0 }}
                     />
                     <span style={{ color: "var(--txd)", fontSize: 10, width: 32, textAlign: "right", flexShrink: 0 }}>
                       #{globalIdx + 1}
@@ -759,29 +965,53 @@ function PhaseView({
                       {group.entries.length}
                     </span>
                     <span style={{ width: 44, textAlign: "center", flexShrink: 0 }} onClick={(e) => e.stopPropagation()}>
-                      <input type="checkbox" checked={hasPause}
+                      <input className="checkbox" type="checkbox" checked={hasPause}
                         onChange={() => onTogglePause(globalIdx, phase)}
                         disabled={locked}
-                        title={t("mods.pause_tooltip", "Pause after this mod")} style={{ width: 14, height: 14 }}
+                        title={t("mods.pause_tooltip", "Pause after this mod")}
                       />
                     </span>
                     {installStatus && installStatus.size > 0 && (() => {
-                      // Compute mod-level status from component statuses
+                      // Compute mod-level status from component statuses.
+                      // Priority: error > skip > warn > already (pre-existing) > fresh success > incomplete.
+                      // Skip outranks warn because a skipped component means the mod
+                      // wasn't installed at all for that slot — a more consequential
+                      // outcome than a warning on a component that DID install.
                       const statuses = group.entries.map(e => installStatus.get(`${e.mod_name}:${e.component}`));
                       const hasAny = statuses.some(s => s !== undefined);
                       const allDone = statuses.every(s => s !== undefined);
-                      const hasError = statuses.some(s => s === "error");
-                      const hasWarn = statuses.some(s => s === "warning");
-                      const hasSkip = statuses.some(s => s === "skipped");
-                      const color = hasError ? "var(--red)" : hasWarn ? "var(--org)" : hasSkip ? "var(--txd)" : allDone ? "var(--grn)" : hasAny ? "var(--gold)" : "var(--txd)";
+                      const errCount = statuses.filter(s => s === "error").length;
+                      const warnCount = statuses.filter(s => s === "warning").length;
+                      const skipCount = statuses.filter(s => s === "skipped").length;
+                      const alreadyCount = statuses.filter(s => s === "already").length;
+                      const freshCount = statuses.filter(s => s === "success").length;
+                      const hasError = errCount > 0;
+                      const hasWarn = warnCount > 0;
+                      const hasSkip = skipCount > 0;
+                      // `already` means components were filtered as pre-installed at plan time —
+                      // they were NOT installed during this run. Distinct from fresh success.
+                      const allAlready = allDone && alreadyCount === statuses.length;
+                      const mixedAlready = alreadyCount > 0 && freshCount > 0 && !hasError && !hasWarn && !hasSkip;
+                      const color = hasError ? "var(--red)"
+                        : hasSkip ? "var(--txd)"
+                        : hasWarn ? "var(--org)"
+                        : allAlready ? "var(--cyn)"
+                        : mixedAlready ? "var(--cyn)"
+                        : allDone ? "var(--grn)"
+                        : hasAny ? "var(--gold)"
+                        : "var(--txd)";
                       const label = !hasAny ? "\u2014"
-                        : hasError ? `${statuses.filter(s => s === "error").length} err`
-                        : hasWarn ? `${statuses.filter(s => s === "warning").length} warn`
-                        : hasSkip ? "skip"
+                        : hasError ? `${errCount} err`
+                        : hasSkip ? `${skipCount} skip`
+                        : hasWarn ? `${warnCount} warn`
+                        : allAlready ? "prev"
+                        : mixedAlready ? `+${freshCount}`
                         : allDone ? "\u2713"
                         : `${statuses.filter(s => s).length}/${statuses.length}`;
+                      const title = !hasAny ? undefined
+                        : `${freshCount} installed, ${alreadyCount} already, ${warnCount} warn, ${errCount} err, ${skipCount} skip`;
                       return (
-                        <span style={{ width: 60, textAlign: "center", color, fontSize: 10, fontWeight: 600, flexShrink: 0 }}>
+                        <span title={title} style={{ width: 60, textAlign: "center", color, fontSize: 10, fontWeight: 600, flexShrink: 0 }}>
                           {label}
                         </span>
                       );
@@ -811,26 +1041,124 @@ function PhaseView({
                   {/* Expanded components */}
                   {isExpanded && (
                     <div style={{ borderLeft: "3px solid var(--brd)", borderBottom: "1px solid var(--brd)" }}>
+                      {/* Report-issue affordance — opens a pre-filled GitHub
+                          issue against the Forge so users can flag bad URLs,
+                          stale tags, or moved repos. Forge fixes propagate to
+                          all users without a Runner release. */}
+                      {onReportMod && (
+                        <div style={{
+                          display: "flex", justifyContent: "flex-end",
+                          padding: "3px 8px 3px 52px",
+                        }}>
+                          <button
+                            onClick={() => onReportMod(group.modName, info?.displayName || group.modName)}
+                            style={{
+                              background: "transparent", border: "none",
+                              color: "var(--txd)", fontSize: 10, cursor: "pointer",
+                              textDecoration: "underline", padding: 0,
+                            }}
+                            title={t("mods.report_tooltip", "Open a GitHub issue to report a bad link, wrong version, or other Forge data problem for this mod")}
+                          >
+                            {t("mods.report_issue", "Report issue with this mod")}
+                          </button>
+                        </div>
+                      )}
                       {group.entries.map((entry) => {
                         const key = makeKey(entry);
                         const excluded = excludedComponents.has(key);
                         const forgeComp = info?.components.get(Number(entry.component));
+                        const compStatus = installStatus?.get(key);
+                        const issue = installIssues?.get(key);
+                        const isDeprecated = !!forgeComp?.deprecated;
+                        const depAutoSkipped = deprecatedAutoSkipped.has(key) && !userIncludedDeprecated.has(key);
+                        const depReason = typeof forgeComp?.deprecated === "string" ? forgeComp.deprecated : "";
+                        // Per-component status badge: only shown once an install has
+                        // reported outcomes. Colors match the mod-level rollup palette.
+                        const badgeInfo = compStatus === "error" ? { label: "err", color: "var(--red)" }
+                          : compStatus === "warning" ? { label: "warn", color: "var(--org)" }
+                          : compStatus === "skipped" ? { label: "skip", color: "var(--txd)" }
+                          : compStatus === "already" ? { label: "prev", color: "var(--cyn)" }
+                          : compStatus === "success" ? { label: "\u2713", color: "var(--grn)" }
+                          : null;
                         return (
-                          <div key={key} style={{
-                            display: "flex", alignItems: "center", gap: 8,
-                            padding: "3px 8px 3px 52px", fontSize: 12, opacity: excluded ? 0.4 : 1,
-                          }}>
-                            <input type="checkbox" checked={!excluded}
-                              onChange={() => onToggleComponent(entry)} disabled={locked} style={{ width: 13, height: 13 }}
-                            />
-                            <span style={{ color: "var(--txd)", fontSize: 10, minWidth: 32 }}>#{entry.component}</span>
-                            <span style={{ color: "var(--tx)", textDecoration: excluded ? "line-through" : "none", flex: 1 }}>
-                              {forgeComp?.name || entry.component_name || `Component ${entry.component}`}
-                            </span>
-                            {entry.version && (
-                              <span style={{ color: "var(--txd)", fontSize: 10 }}>
-                                {entry.version.startsWith("v") ? entry.version : `v${entry.version}`}
+                          <div key={key}>
+                            <div style={{
+                              display: "flex", alignItems: "center", gap: 8,
+                              padding: "3px 8px 3px 52px", fontSize: 12,
+                              opacity: excluded ? (depAutoSkipped ? 0.6 : 0.4) : 1,
+                            }}>
+                              <input className="checkbox" type="checkbox" checked={!excluded}
+                                onChange={() => onToggleComponent(entry)} disabled={locked}
+                              />
+                              <span style={{
+                                color: "var(--txd)", fontSize: 10, minWidth: 32,
+                                textDecoration: isDeprecated ? "line-through" : "none",
+                              }}>#{entry.component}</span>
+                              <span style={{
+                                color: isDeprecated ? "var(--txd)" : "var(--tx)",
+                                textDecoration: excluded ? "line-through" : "none",
+                                fontStyle: isDeprecated ? "italic" : "normal",
+                                flex: 1,
+                              }}>
+                                {forgeComp?.name || entry.component_name || `Component ${entry.component}`}
                               </span>
+                              {isDeprecated && (
+                                <Tip content={
+                                  <>
+                                    <span className="tip-title">{t("mods.dep_tip_title", "Deprecated component")}</span>
+                                    <span className="tip-desc">
+                                      {depReason || t("mods.dep_tooltip_fallback", "Deprecated by mod author")}
+                                    </span>
+                                    {depAutoSkipped ? (
+                                      <span className="tip-warn">
+                                        {t("mods.dep_tip_autoskip", "Auto-skipped. Click Include anyway to override.")}
+                                      </span>
+                                    ) : null}
+                                  </>
+                                }>
+                                  <span className="badge warn">
+                                    {t("mods.dep_badge", "DEP")}
+                                  </span>
+                                </Tip>
+                              )}
+                              {depAutoSkipped && (
+                                <button
+                                  className="btn"
+                                  onClick={() => onIncludeDeprecated(entry)}
+                                  disabled={locked}
+                                  title={t("mods.dep_include_hint", "Override the mod author's deprecation and install this component anyway")}
+                                  style={{ fontSize: 10, padding: "1px 8px", opacity: 0.8 }}
+                                >
+                                  {t("mods.dep_include", "Include anyway")}
+                                </button>
+                              )}
+                              {entry.version && (
+                                <span style={{ color: "var(--txd)", fontSize: 10 }}>
+                                  {entry.version.startsWith("v") ? entry.version : `v${entry.version}`}
+                                </span>
+                              )}
+                              {badgeInfo && (
+                                <span style={{
+                                  color: badgeInfo.color, fontSize: 10, fontWeight: 600,
+                                  minWidth: 36, textAlign: "right",
+                                }}>
+                                  {badgeInfo.label}
+                                </span>
+                              )}
+                            </div>
+                            {/* Issue detail — shown inline under the component row when
+                                the install produced an err/warn/skip for this component.
+                                Trimmed for brevity; full text is in the Install tab Issues panel. */}
+                            {issue && issue.message && (
+                              <div style={{
+                                padding: "2px 8px 4px 96px", fontSize: 11,
+                                color: issue.level === "ERROR" ? "var(--red)"
+                                  : issue.level === "WARN" ? "var(--org)" : "var(--txd)",
+                                fontFamily: "var(--mono, monospace)",
+                                whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
+                              }} title={issue.message}>
+                                {issue.message}
+                              </div>
                             )}
                           </div>
                         );

@@ -20,7 +20,23 @@ pub struct BackupManifest {
     pub total_bytes: u64,
     pub file_count: u64,
     pub completed: bool,
+    /// Lowercased names of every top-level entry (files AND directories) that
+    /// existed in the game directory at the moment the backup was created.
+    /// Used by selective restore to remove post-install side-folders that
+    /// don't contain a .tp2 themselves (e.g. TDD subfolders, Mercenaries
+    /// asset dirs). Empty on old backups — the restore logic treats empty
+    /// as "no inventory available, fall back to tp2-only heuristic".
+    #[serde(default)]
+    pub pre_install_top_level: Vec<String>,
+    /// Which game this backup represents. One of "bg1" | "bg2" | "iwd" |
+    /// "iwd2" | "pst". Defaults to "bg2" for backward compatibility with
+    /// older backups that didn't carry this marker — pre-9b backups were
+    /// all BG2 since that was the only supported target.
+    #[serde(default = "default_game_kind")]
+    pub game_kind: String,
 }
+
+fn default_game_kind() -> String { "bg2".to_string() }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -32,6 +48,10 @@ pub struct BackupInfo {
     pub file_count: u64,
     pub path: String,
     pub completed: bool,
+    /// Which game this backup represents ("bg1" | "bg2" | "iwd" | "iwd2" | "pst").
+    /// Populated from the backup's manifest; defaults to "bg2" for pre-9b
+    /// backups that didn't carry this marker.
+    pub game_kind: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -113,6 +133,7 @@ pub fn create_backup(
     backup_dir: &Path,
     name: &str,
     mode: &str,
+    game_kind: &str,
     abort: &AtomicBool,
 ) -> Result<BackupManifest, String> {
     // Create timestamped folder
@@ -124,6 +145,16 @@ pub fn create_backup(
     std::fs::create_dir_all(&dest)
         .map_err(|e| format!("Failed to create backup directory: {e}"))?;
 
+    // Snapshot the top-level layout of the game dir BEFORE any install runs.
+    // Selective restore uses this to distinguish pre-existing dirs from
+    // install side-folders that should be removed on restore.
+    let pre_install_top_level: Vec<String> = std::fs::read_dir(game_dir)
+        .ok()
+        .map(|rd| rd.filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_lowercase())
+            .collect::<Vec<_>>())
+        .unwrap_or_default();
+
     // Write initial manifest
     let mut manifest = BackupManifest {
         version: 1,
@@ -134,6 +165,8 @@ pub fn create_backup(
         total_bytes: 0,
         file_count: 0,
         completed: false,
+        pre_install_top_level,
+        game_kind: game_kind.to_string(),
     };
     write_manifest(&dest, &manifest)?;
 
@@ -245,13 +278,14 @@ fn copy_selective_backup(
 
 // ── Restore ──
 
-/// Files and directories created by EET Mod Runner in the game directory.
-const EETMR_ARTIFACTS: &[&str] = &[
+/// Files and directories created by the Runner in the game directory.
+/// Cleaned during backup restore to reset to a pristine snapshot.
+const RUNNER_ARTIFACTS: &[&str] = &[
     ".eetmr_install.lock",
     ".eetmr_checkpoint.json",
     "eetmr_install.log",
 ];
-const EETMR_DIRS: &[&str] = &[
+const RUNNER_DIRS: &[&str] = &[
     "tlk_backups",
     "mod_installer_backups",
 ];
@@ -277,7 +311,7 @@ pub fn restore_backup(
     });
 
     let _ = app.emit("install:stdout",
-        "[EET Mod Runner] Restore: cleaning game directory...");
+        "[Infinity Mod Runner] Restore: cleaning game directory...");
 
     let mut removed = 0u32;
 
@@ -299,7 +333,7 @@ pub fn restore_backup(
                 if backup_entries.contains(&name) { continue; }
                 let path = entry.path();
                 let _ = app.emit("install:stdout",
-                    format!("[EET Mod Runner] Removing: {}", entry.file_name().to_string_lossy()));
+                    format!("[Infinity Mod Runner] Removing: {}", entry.file_name().to_string_lossy()));
                 if path.is_dir() { remove_dir_or_junction(&path); }
                 else { let _ = std::fs::remove_file(&path); }
                 removed += 1;
@@ -310,7 +344,7 @@ pub fn restore_backup(
         // 1. Remove override/ (will be restored from backup)
         let override_dir = game_dir.join("override");
         if override_dir.is_dir() {
-            let _ = app.emit("install:stdout", "[EET Mod Runner] Clearing override/ ...");
+            let _ = app.emit("install:stdout", "[Infinity Mod Runner] Clearing override/ ...");
             let _ = std::fs::remove_dir_all(&override_dir);
             removed += 1;
         }
@@ -336,10 +370,25 @@ pub fn restore_backup(
             }
         }
 
-        // 4. Remove mod folders that may need fresh patching
-        // These are directories containing a .tp2 file
-        // IMPORTANT: junction points must be removed with remove_dir (not remove_dir_all)
-        // to avoid following the junction and deleting the Extracted source
+        // 4. Remove mod folders AND install side-folders.
+        //
+        // Two signals identify a top-level dir as "added by this install":
+        //   a) It contains a .tp2 file (a WeiDU mod folder)
+        //   b) It was NOT present in the pre-install inventory (side-folder
+        //      added by a mod during install — e.g. TDD's asset dirs,
+        //      Mercenaries' support dirs, anything not containing a tp2
+        //      but still created by the install pipeline).
+        //
+        // Signal (b) requires `pre_install_top_level` to be populated in the
+        // manifest. Older backups without that field fall back to (a) only.
+        //
+        // IMPORTANT: junction points must be removed with remove_dir (not
+        // remove_dir_all) to avoid following the junction and deleting the
+        // Extracted source. `remove_dir_or_junction` handles this.
+        let pre_install: HashSet<String> = manifest.pre_install_top_level
+            .iter().map(|s| s.to_lowercase()).collect();
+        let have_inventory = !pre_install.is_empty();
+
         if let Ok(entries) = std::fs::read_dir(game_dir) {
             for entry in entries.filter_map(|e| e.ok()) {
                 if abort.load(Ordering::SeqCst) {
@@ -348,25 +397,33 @@ pub fn restore_backup(
                 let path = entry.path();
                 if !path.is_dir() { continue; }
 
+                let name_lower = entry.file_name().to_string_lossy().to_lowercase();
+
                 let has_tp2 = std::fs::read_dir(&path).ok().map_or(false, |mut rd| {
                     rd.any(|e| e.ok().map_or(false, |e| {
                         e.path().extension().map_or(false, |ext| ext.eq_ignore_ascii_case("tp2"))
                     }))
                 });
-                if has_tp2 {
+                let is_post_install_sidefolder = have_inventory && !pre_install.contains(&name_lower);
+
+                if has_tp2 || is_post_install_sidefolder {
+                    let label = if has_tp2 { "mod" } else { "side-folder" };
                     let _ = app.emit("install:stdout",
-                        format!("[EET Mod Runner] Removing mod: {}", entry.file_name().to_string_lossy()));
+                        format!("[Infinity Mod Runner] Removing {}: {}", label, entry.file_name().to_string_lossy()));
                     remove_dir_or_junction(&path);
                     removed += 1;
                 }
             }
         }
 
-        // 5. Remove setup-*.DEBUG files
+        // 5. Remove *.DEBUG files (both per-mod setup-*.DEBUG and WeiDU's
+        //    global WSETUP.DEBUG). The original check only matched setup-*
+        //    prefixed files, leaving WSETUP.DEBUG behind after restore.
         if let Ok(entries) = std::fs::read_dir(game_dir) {
             for entry in entries.filter_map(|e| e.ok()) {
                 let fname = entry.file_name().to_string_lossy().to_lowercase();
-                if fname.starts_with("setup-") && (fname.ends_with(".debug") || fname.ends_with(".debug.bak")) {
+                let is_debug = fname.ends_with(".debug") || fname.ends_with(".debug.bak");
+                if is_debug && (fname.starts_with("setup-") || fname == "wsetup.debug" || fname == "wsetup.debug.bak") {
                     let _ = std::fs::remove_file(entry.path());
                     removed += 1;
                 }
@@ -388,7 +445,7 @@ pub fn restore_backup(
         for dir_name in &["weidu_backup", "inlined", "weidu_external", "portraits"] {
             let p = game_dir.join(dir_name);
             if p.is_dir() {
-                let _ = app.emit("install:stdout", format!("[EET Mod Runner] Removing: {dir_name}/"));
+                let _ = app.emit("install:stdout", format!("[Infinity Mod Runner] Removing: {dir_name}/"));
                 remove_dir_or_junction(&p);
                 removed += 1;
             }
@@ -416,7 +473,7 @@ pub fn restore_backup(
                     fname_lower == "override.cre";
 
                 if should_remove {
-                    let _ = app.emit("install:stdout", format!("[EET Mod Runner] Removing: {fname}"));
+                    let _ = app.emit("install:stdout", format!("[Infinity Mod Runner] Removing: {fname}"));
                     let _ = std::fs::remove_file(&path);
                     removed += 1;
                 }
@@ -424,18 +481,18 @@ pub fn restore_backup(
         }
     }
 
-    // Clean EETMR artifacts regardless of backup mode
-    for name in EETMR_ARTIFACTS {
+    // Clean Infinity Mod Runner artifacts regardless of backup mode
+    for name in RUNNER_ARTIFACTS {
         let p = game_dir.join(name);
         if p.exists() { let _ = std::fs::remove_file(&p); removed += 1; }
     }
-    for name in EETMR_DIRS {
+    for name in RUNNER_DIRS {
         let p = game_dir.join(name);
         if p.is_dir() { remove_dir_or_junction(&p); removed += 1; }
     }
 
     let _ = app.emit("install:stdout",
-        format!("[EET Mod Runner] Cleanup complete: {removed} items removed"));
+        format!("[Infinity Mod Runner] Cleanup complete: {removed} items removed"));
 
     if abort.load(Ordering::SeqCst) {
         return Err("Restore cancelled during cleanup".to_string());
@@ -443,7 +500,7 @@ pub fn restore_backup(
 
     // ── Phase 2: Restore from backup ──
     let _ = app.emit("install:stdout",
-        format!("[EET Mod Runner] Restore: copying {} files from backup...", manifest.file_count));
+        format!("[Infinity Mod Runner] Restore: copying {} files from backup...", manifest.file_count));
 
     let total_bytes = manifest.total_bytes;
     let total_files = manifest.file_count;
@@ -519,6 +576,7 @@ pub fn list_backups(backup_dir: &Path) -> Result<Vec<BackupInfo>, String> {
                 file_count: manifest.file_count,
                 path: path.to_string_lossy().to_string(),
                 completed: manifest.completed,
+                game_kind: manifest.game_kind,
             });
         }
     }
@@ -526,6 +584,68 @@ pub fn list_backups(backup_dir: &Path) -> Result<Vec<BackupInfo>, String> {
     // Sort newest first
     backups.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
     Ok(backups)
+}
+
+// ── Verify ──
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VerifyResult {
+    /// True when manifest file_count + total_bytes match what's on disk,
+    /// and the manifest flagged the backup as completed.
+    pub ok: bool,
+    /// What the manifest claims.
+    pub manifest_file_count: u64,
+    pub manifest_total_bytes: u64,
+    /// What we actually see on disk (excluding manifest.json itself).
+    pub actual_file_count: u64,
+    pub actual_total_bytes: u64,
+    /// Human-readable notes. Empty when `ok` is true.
+    pub issues: Vec<String>,
+}
+
+/// Lightweight integrity check on a backup directory. Walks the backup
+/// contents and compares observed file count + total bytes against the
+/// manifest. Does NOT byte-hash files — that would be minutes for a
+/// large selective backup. The goal is to catch truncated / partially
+/// deleted backups before the user starts a restore.
+pub fn verify_backup(backup_path: &Path) -> Result<VerifyResult, String> {
+    let manifest = read_manifest(backup_path)?;
+    let mut actual_files = 0u64;
+    let mut actual_bytes = 0u64;
+    walk_dir_recursive(backup_path, &mut |p, size| {
+        // Skip the manifest itself — it's not part of the captured game data.
+        if p.file_name().map(|n| n == "manifest.json").unwrap_or(false) { return; }
+        actual_files += 1;
+        actual_bytes += size;
+    })?;
+
+    let mut issues = Vec::new();
+    if !manifest.completed {
+        issues.push("Backup is marked incomplete (creation was interrupted).".to_string());
+    }
+    if manifest.file_count != actual_files {
+        issues.push(format!(
+            "File count mismatch: manifest expects {}, on disk {}.",
+            manifest.file_count, actual_files,
+        ));
+    }
+    if manifest.total_bytes.abs_diff(actual_bytes) > manifest.total_bytes / 100 {
+        // Tolerate < 1% drift (filesystem block rounding, sparse files).
+        issues.push(format!(
+            "Total bytes mismatch: manifest {}, on disk {}.",
+            manifest.total_bytes, actual_bytes,
+        ));
+    }
+
+    Ok(VerifyResult {
+        ok: issues.is_empty(),
+        manifest_file_count: manifest.file_count,
+        manifest_total_bytes: manifest.total_bytes,
+        actual_file_count: actual_files,
+        actual_total_bytes: actual_bytes,
+        issues,
+    })
 }
 
 /// Delete a backup directory. Verifies manifest.json exists to prevent accidental deletion.

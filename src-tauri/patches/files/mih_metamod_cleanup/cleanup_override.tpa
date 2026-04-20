@@ -1,59 +1,148 @@
 DEFINE_ACTION_FUNCTION cleanup_override
 BEGIN
-  // Rename *.pvr to *.pvrz
+  // _eetmr_cleanup_v6: preserve critical files AND large binary resources OUTSIDE override/ to keep
+  // the resulting mh#clean.bif under 4 GB. BIFF V1 uses 32-bit offset+size fields; past ~4 GB,
+  // resource offsets wrap and every post-wrap resource reads garbage. Tests #26-33 showed a 6.2 GB
+  // mh#clean.bif corrupting ~49,000 resources including BG0100.ARE (observed index 101887).
+  //
+  // Strategy: MOVE large resources into weidu_external/_eetmr_preserve/ (outside override/ and
+  // outside the MAKE_BIFF regex scope), run MAKE_BIFF on what's left (small scripts/dialogs/spells),
+  // then MOVE everything back into override/.
+  //
+  // Extension preservation rationale:
+  //   .ids, .bcs    — biffed copies corrupted by MAKE_BIFF pre-existing problem (v3+)
+  //   .2da          — CAMPAIGN/PDIALOG needed intact by EET_end (v4-v5)
+  //   EET.flag      — required by EET_end to recognize the install (v4-v5)
+  //   .tis          — tilesets, 10-50 MB each, main BIFF-size driver (v6)
+  //   .mos          — UI backgrounds and area minimaps, multi-MB (v6)
+  //   .pvrz         — compressed textures, large (v6)
+  //   .bam          — animations, moderate size but numerous (v6)
+  //   .bmp          — portraits, images (v6)
+  //   .wav          — audio (v6)
+  //   .are, .wed    — area files; post-wrap index corruption observed on BG0100.ARE (v6)
 
+  // Rename *.pvr to *.pvrz before preservation pass
   ACTION_BASH_FOR "override" "^.*\.pvr$"
   BEGIN
     MOVE "%BASH_FOR_FILESPEC%" "%BASH_FOR_FILESPEC%z"
   END
 
+  // Preserve destination: OUTSIDE override/ so MAKE_BIFF can't find it
+  MKDIR "weidu_external/_eetmr_preserve"
 
-  // Biff game files in override
-  // FIX: First move .IDS and .BCS files to a temp location so MAKE_BIFF can't corrupt them.
-  // WeiDU's MAKE_BIFF regex ^..?.?.?.?.?.?.?\.....?$ matches more than expected,
-  // including .BCS files. Biffed BCS/IDS files become corrupt and break EET_end.
+  // --- PRE-v6 preservation (correctness: biffed copies break EET_end) ---
 
-  MKDIR "override/_eetmr_preserve"
+  // Preserve .IDS — biffed IDS gets corrupted and breaks EET_end
   ACTION_BASH_FOR "override" "^.*\.ids$"
   BEGIN
-    MOVE "%BASH_FOR_FILESPEC%" "override/_eetmr_preserve/%BASH_FOR_FILE%"
-  END
-  ACTION_BASH_FOR "override" "^.*\.bcs$"
-  BEGIN
-    MOVE "%BASH_FOR_FILESPEC%" "override/_eetmr_preserve/%BASH_FOR_FILE%"
-  END
-  // FIX: Also preserve CAMPAIGN.2DA — EET_end needs it with correct row structure.
-  // MAKE_BIFF would incorporate it, then the override version is gone and EET_end's
-  // SET_2DA_ENTRY finds 0 rows.
-  ACTION_IF FILE_EXISTS "override/CAMPAIGN.2DA" BEGIN
-    MOVE "override/CAMPAIGN.2DA" "override/_eetmr_preserve/CAMPAIGN.2DA"
+    MOVE "%BASH_FOR_FILESPEC%" "weidu_external/_eetmr_preserve/%BASH_FOR_FILE%"
   END
 
+  // Preserve .BCS — same reason
+  ACTION_BASH_FOR "override" "^.*\.bcs$"
+  BEGIN
+    MOVE "%BASH_FOR_FILESPEC%" "weidu_external/_eetmr_preserve/%BASH_FOR_FILE%"
+  END
+
+  // Preserve CAMPAIGN.2DA — EET_end's SET_2DA_ENTRY needs intact rows
+  ACTION_IF FILE_EXISTS "override/CAMPAIGN.2DA" BEGIN
+    MOVE "override/CAMPAIGN.2DA" "weidu_external/_eetmr_preserve/CAMPAIGN.2DA"
+  END
+
+  // Preserve PDIALOG.2DA — EET_end's REPLACE_TEXTUALLY on PDIALOG needs intact regex-captured
+  // groups. Biffed PDIALOG.2DA has whitespace/format differences that break EET_end's regex
+  // with "Str.replace: reference to unmatched group". Observed Test #31.
+  ACTION_IF FILE_EXISTS "override/PDIALOG.2DA" BEGIN
+    MOVE "override/PDIALOG.2DA" "weidu_external/_eetmr_preserve/PDIALOG.2DA"
+  END
+
+  // Preserve EET.flag — required by EET_end to recognize EET installation
+  ACTION_IF FILE_EXISTS "override/EET.flag" BEGIN
+    MOVE "override/EET.flag" "weidu_external/_eetmr_preserve/EET.flag"
+  END
+
+  // --- v6 preservation (scale: keep mh#clean.bif under 4 GB) ---
+
+  // Preserve .TIS — tilesets, primary size contributor
+  ACTION_BASH_FOR "override" "^.*\.tis$"
+  BEGIN
+    MOVE "%BASH_FOR_FILESPEC%" "weidu_external/_eetmr_preserve/%BASH_FOR_FILE%"
+  END
+
+  // Preserve .MOS — UI/map backgrounds
+  ACTION_BASH_FOR "override" "^.*\.mos$"
+  BEGIN
+    MOVE "%BASH_FOR_FILESPEC%" "weidu_external/_eetmr_preserve/%BASH_FOR_FILE%"
+  END
+
+  // Preserve .PVRZ — compressed textures
+  ACTION_BASH_FOR "override" "^.*\.pvrz$"
+  BEGIN
+    MOVE "%BASH_FOR_FILESPEC%" "weidu_external/_eetmr_preserve/%BASH_FOR_FILE%"
+  END
+
+  // Preserve .BAM — animations
+  ACTION_BASH_FOR "override" "^.*\.bam$"
+  BEGIN
+    MOVE "%BASH_FOR_FILESPEC%" "weidu_external/_eetmr_preserve/%BASH_FOR_FILE%"
+  END
+
+  // Preserve .BMP — images, portraits
+  ACTION_BASH_FOR "override" "^.*\.bmp$"
+  BEGIN
+    MOVE "%BASH_FOR_FILESPEC%" "weidu_external/_eetmr_preserve/%BASH_FOR_FILE%"
+  END
+
+  // Preserve .WAV — audio
+  ACTION_BASH_FOR "override" "^.*\.wav$"
+  BEGIN
+    MOVE "%BASH_FOR_FILESPEC%" "weidu_external/_eetmr_preserve/%BASH_FOR_FILE%"
+  END
+
+  // Preserve .ARE — area files (BG0100.ARE corruption at post-wrap index observed Test #33)
+  ACTION_BASH_FOR "override" "^.*\.are$"
+  BEGIN
+    MOVE "%BASH_FOR_FILESPEC%" "weidu_external/_eetmr_preserve/%BASH_FOR_FILE%"
+  END
+
+  // Preserve .WED — overlays paired with .ARE
+  ACTION_BASH_FOR "override" "^.*\.wed$"
+  BEGIN
+    MOVE "%BASH_FOR_FILESPEC%" "weidu_external/_eetmr_preserve/%BASH_FOR_FILE%"
+  END
+
+  // Run MAKE_BIFF on override/ (preserved files are already out of scope)
   MAKE_BIFF "mh#clean"
   BEGIN
     "override" "^..?.?.?.?.?.?.?\.....?$"
   END
 
-  // Move preserved files back
-  ACTION_BASH_FOR "override/_eetmr_preserve" "^.*$"
+  // Restore preserved files back to override
+  ACTION_BASH_FOR "weidu_external/_eetmr_preserve" "^.*$"
   BEGIN
     MOVE "%BASH_FOR_FILESPEC%" "override/%BASH_FOR_FILE%"
   END
-  // Clean up temp dir (may fail if not empty, that's OK)
 
-
-  // Remove remaining files in override
-  // FIX: Skip EET.flag — required by EET_end to recognize EET installation.
-  // FIX: Skip .IDS and .BCS files — biffing corrupts them, they must stay in override.
-
+  // Remove remaining files in override (exclude critical preserved file types).
+  // The ACTION_BASH_FOR at the end is a belt-and-suspenders cleanup; the preserve MOVE
+  // above should have emptied override/ already for the BIFF-bound subset.
   ACTION_BASH_FOR "override" "^.*$"
   BEGIN
     ACTION_IF NOT (~%BASH_FOR_FILE%~ STRING_EQUAL_CASE ~EET.flag~
                OR ~%BASH_FOR_FILE%~ STRING_MATCHES_REGEXP ~^.*\.ids$~ = 0
                OR ~%BASH_FOR_FILE%~ STRING_MATCHES_REGEXP ~^.*\.bcs$~ = 0
+               OR ~%BASH_FOR_FILE%~ STRING_MATCHES_REGEXP ~^.*\.2da$~ = 0
+               OR ~%BASH_FOR_FILE%~ STRING_MATCHES_REGEXP ~^.*\.tis$~ = 0
+               OR ~%BASH_FOR_FILE%~ STRING_MATCHES_REGEXP ~^.*\.mos$~ = 0
+               OR ~%BASH_FOR_FILE%~ STRING_MATCHES_REGEXP ~^.*\.pvrz$~ = 0
+               OR ~%BASH_FOR_FILE%~ STRING_MATCHES_REGEXP ~^.*\.bam$~ = 0
+               OR ~%BASH_FOR_FILE%~ STRING_MATCHES_REGEXP ~^.*\.bmp$~ = 0
+               OR ~%BASH_FOR_FILE%~ STRING_MATCHES_REGEXP ~^.*\.wav$~ = 0
+               OR ~%BASH_FOR_FILE%~ STRING_MATCHES_REGEXP ~^.*\.are$~ = 0
+               OR ~%BASH_FOR_FILE%~ STRING_MATCHES_REGEXP ~^.*\.wed$~ = 0
                OR ~%BASH_FOR_FILE%~ STRING_EQUAL_CASE ~CAMPAIGN.2DA~
-               OR ~%BASH_FOR_FILE%~ STRING_EQUAL_CASE ~_eetmr_preserve~) BEGIN
+               OR ~%BASH_FOR_FILE%~ STRING_EQUAL_CASE ~PDIALOG.2DA~) BEGIN
       DELETE "%BASH_FOR_FILESPEC%"
     END
   END
-END	// cleanup_files
+END  // cleanup_override

@@ -1,599 +1,1869 @@
 [
   {
+    "id": 59,
+    "name": "Talents of Faerun \u00e2\u20ac\u201d cache iter_resource across HLA summon spell_list",
+    "description": "dw_talents #60200 EMPOWERED_MONSTER_SUMMONING calls iter_resource 11 times in a row (once per wizard summoning spell), each call doing a full recursive graph walk via math_traverse_graph. The graphs overlap heavily (creatures summoned by Monster Summoning 2 include all of MS1's plus a few new ones, etc.), so ~80-90% of the COPY_EXISTING + DECOMPILE_BCS_TO_BAF work is repeated from scratch on every call. Observed in session 6693001a: 237,330 'Copying and patching 1 file ...' ops in this one feat (~2h 58m wall clock). This patch adds an opt-in `keep_visited` parameter that preserves SFO_visited_nodes across calls, so subsequent iter_resource invocations short-circuit already-walked subgraphs. Estimated savings: 60-80% of the 3h \u00e2\u2020\u2019 1.5-2h reduction. Three coordinated ops: (1) math_traverse_graph accepts the new param, (2) iter_resource forwards it, (3) empowered_creature_setup uses it with an outer ACTION_CLEAR_ARRAY once before the loop. Ops 1+2 are strictly backward-compatible (default keep_visited=0 preserves current behaviour for all other callers). Op 3 is the only behavioural change and only affects the 4 empowered_* summoning feats. Complements patch #58 (dedupe typo); both apply cleanly together.",
+    "target_mod": "dw_talents",
+    "trigger": {
+      "type": "file_exists",
+      "path": "dw_talents/hla_feat/hla_spec_summons.tph"
+    },
+    "marker": {
+      "file": "dw_talents/hla_feat/hla_spec_summons.tph",
+      "text": "_eetmr_graph_accumulator_v1"
+    },
+    "ops": [
+      {
+        "type": "replace",
+        "file": "dw_talents/sfo/lib_math.tph",
+        "find": "DEFINE_DIMORPHIC_FUNCTION math_traverse_graph\n\tINT_VAR max_iterations=1000\n\t\t\tsilent=0//boolean\n\t\t\ttelemetry=0//boolean\n\tSTR_VAR start=\"\"\n\t\t\trelates_to=\"\"//function\n\t\t\tparameter=\"\"\n\tRET_ARRAY visited_nodes\nBEGIN\n\tOUTER_SET stopped=0\n\tOUTER_SET count=0\n\tACTION_CLEAR_ARRAY current_nodes\n\tACTION_CLEAR_ARRAY SFO_visited_nodes // we need an internal version because otherwise iterated use leaves entries we can't clear reliably",
+        "replace": "// _eetmr_graph_accumulator_v1: added opt-in `keep_visited` \u00e2\u20ac\u201d when set, skip the SFO_visited_nodes\n// reset so consecutive calls accumulate their traversals. Backward-compatible: default 0 preserves\n// legacy per-call behaviour. Used by empowered_creature_setup's 11-spell loop to avoid re-walking\n// shared summoning subgraphs on every spell (saves ~60-80% of a 3h dw_talents component).\nDEFINE_DIMORPHIC_FUNCTION math_traverse_graph\n\tINT_VAR max_iterations=1000\n\t\t\tsilent=0//boolean\n\t\t\ttelemetry=0//boolean\n\t\t\tkeep_visited=0//boolean \u00e2\u20ac\u201d _eetmr_graph_accumulator_v1: when 1, skip the SFO_visited_nodes reset\n\tSTR_VAR start=\"\"\n\t\t\trelates_to=\"\"//function\n\t\t\tparameter=\"\"\n\tRET_ARRAY visited_nodes\nBEGIN\n\tOUTER_SET stopped=0\n\tOUTER_SET count=0\n\tACTION_CLEAR_ARRAY current_nodes\n\tACTION_IF !keep_visited BEGIN\n\t\tACTION_CLEAR_ARRAY SFO_visited_nodes // we need an internal version because otherwise iterated use leaves entries we can't clear reliably\n\tEND"
+      },
+      {
+        "type": "replace",
+        "file": "dw_talents/sfo/lib_iter.tph",
+        "find": "DEFINE_ACTION_FUNCTION iter_resource\n\tSTR_VAR start=\"\"\n\t\t\tignore=\"\"\n\t\t\tspell_use_function=\"\"\n\t\t\ticon_function=\"\"\n\tRET_ARRAY array\nBEGIN\n\tOUTER_SPRINT SFO_reserved_function \"%spell_use_function%\"\n\tOUTER_SPRINT SFO_reserved_icon_function \"%icon_function%\"\n\tLAF math_traverse_graph STR_VAR start relates_to=iter_main parameter=\"%ignore%\" RET_ARRAY array=visited_nodes END",
+        "replace": "// _eetmr_graph_accumulator_v1: forward `keep_visited` to math_traverse_graph so callers can\n// opt into cross-call accumulation of visited nodes. Default 0 is fully backward-compatible.\nDEFINE_ACTION_FUNCTION iter_resource\n\tINT_VAR keep_visited=0//boolean \u00e2\u20ac\u201d pass-through to math_traverse_graph\n\tSTR_VAR start=\"\"\n\t\t\tignore=\"\"\n\t\t\tspell_use_function=\"\"\n\t\t\ticon_function=\"\"\n\tRET_ARRAY array\nBEGIN\n\tOUTER_SPRINT SFO_reserved_function \"%spell_use_function%\"\n\tOUTER_SPRINT SFO_reserved_icon_function \"%icon_function%\"\n\tLAF math_traverse_graph INT_VAR keep_visited STR_VAR start relates_to=iter_main parameter=\"%ignore%\" RET_ARRAY array=visited_nodes END"
+      },
+      {
+        "type": "replace",
+        "file": "dw_talents/hla_feat/hla_spec_summons.tph",
+        "find": "   // the creatures\n   ACTION_CLEAR_ARRAY array_cre \n   OUTER_WHILE \"%spell_list%\" STR_CMP \"\" BEGIN\n\t\tLAF return_first_entry STR_VAR list=\"%spell_list%\" RET spell_list=list spell=entry END\n\t\tACTION_IF FILE_EXISTS_IN_GAME \"%spell%.spl\" BEGIN\n\t\t\tLAF iter_resource STR_VAR start=\"%spell%.spl\" RET_ARRAY array_here=array END",
+        "replace": "   // the creatures\n   // _eetmr_graph_accumulator_v1: clear SFO_visited_nodes ONCE before the loop and then\n   // call iter_resource with keep_visited=1 so the 11 spells share their traversal state.\n   // Each summoning spell's graph overlaps heavily with the previous ones (common creatures\n   // across MS1-7, Carrion, Wyvern Call, Spider Spawn); without this, every call re-walks\n   // the shared subgraph from scratch, generating 237k COPY_EXISTING/DECOMPILE operations\n   // (~3h wall clock on a full EET install).\n   ACTION_CLEAR_ARRAY SFO_visited_nodes\n   ACTION_CLEAR_ARRAY array_cre \n   OUTER_WHILE \"%spell_list%\" STR_CMP \"\" BEGIN\n\t\tLAF return_first_entry STR_VAR list=\"%spell_list%\" RET spell_list=list spell=entry END\n\t\tACTION_IF FILE_EXISTS_IN_GAME \"%spell%.spl\" BEGIN\n\t\t\tLAF iter_resource INT_VAR keep_visited=1 STR_VAR start=\"%spell%.spl\" RET_ARRAY array_here=array END"
+      }
+    ],
+    "recommended": true,
+    "category": "performance"
+  },
+  {
+    "id": 58,
+    "name": "Talents of Faerun \u00e2\u20ac\u201d dedupe WIZARD_MONSTER_SUMMONING_1 in HLA summons",
+    "description": "dw_talents #60200 (Revised HLA system) installs EMPOWERED_MONSTER_SUMMONING via empowered_creature_setup with a spell_list containing 11 wizard summoning spells. WIZARD_MONSTER_SUMMONING_1 is listed twice in hla_spec_summons.tph line 14 \u00e2\u20ac\u201d almost certainly a typo. Each spell in the list triggers iter_resource (recursive graph walk via COPY_EXISTING + DECOMPILE_BCS_TO_BAF on every touched BCS) with no cross-call caching, so the duplicate re-walks the entire summoning subgraph. Observed in the session 6693001a install: EMPOWERED_MONSTER_SUMMONING alone emitted 237,330 'Copying and patching 1 file ...' lines out of 242,225 total for the component (~98%). Removing the duplicate saves one full graph walk \u00e2\u20ac\u201d roughly 9% of the component's 3-hour wall clock (~15-20 min). Upstream bug (not an Infinity Mod Runner compatibility concern); reporting to dw_talents maintainer is orthogonal.",
+    "target_mod": "dw_talents",
+    "trigger": {
+      "type": "file_exists",
+      "path": "dw_talents/hla_feat/hla_spec_summons.tph"
+    },
+    "marker": {
+      "file": "dw_talents/hla_feat/hla_spec_summons.tph",
+      "text": "_eetmr_dedupe_ms1_v1"
+    },
+    "ops": [
+      {
+        "type": "replace",
+        "file": "dw_talents/hla_feat/hla_spec_summons.tph",
+        "find": "DEFINE_PATCH_FUNCTION EMPOWERED_MONSTER_SUMMONING BEGIN\n\n\tLPF empowered_creature_setup STR_VAR script=\"%baf_empowered_monster_summons%\" splstate=DW_POWER_UPGRADE_C5 spell_list=\"%WIZARD_MONSTER_SUMMONING_1% %WIZARD_MONSTER_SUMMONING_1% %WIZARD_MONSTER_SUMMONING_2%",
+        "replace": "// _eetmr_dedupe_ms1_v1: removed one duplicate %WIZARD_MONSTER_SUMMONING_1% from the\n// spell_list below \u00e2\u20ac\u201d saves one full iter_resource graph walk (~15-20 min on EET megainstalls).\nDEFINE_PATCH_FUNCTION EMPOWERED_MONSTER_SUMMONING BEGIN\n\n\tLPF empowered_creature_setup STR_VAR script=\"%baf_empowered_monster_summons%\" splstate=DW_POWER_UPGRADE_C5 spell_list=\"%WIZARD_MONSTER_SUMMONING_1% %WIZARD_MONSTER_SUMMONING_2%"
+      }
+    ],
+    "recommended": true,
+    "category": "performance"
+  },
+  {
     "id": 1,
-    "name": "Talents of Faerun — SFO Library Fixes",
+    "name": "Talents of Faerun \u00e2\u20ac\u201d SFO Library Fixes",
     "description": "Fixes ALTER_SCRIPT_BLOCK crash, A7/BD/C#AJAN exclusion in disjunctive_substitution, lib_spl, reroute_stats, alter_script",
     "target_mod": "dw_talents",
-    "trigger": { "type": "dir_exists", "path": "dw_talents" },
-    "marker": { "file": "dw_talents/sfo/disjunctive_substitution.tph", "text": "A7!GXRU" },
+    "trigger": {
+      "type": "dir_exists",
+      "path": "dw_talents"
+    },
+    "marker": {
+      "file": "dw_talents/sfo/alter_script.tph",
+      "text": "_eetmr_bcs_prefilter_v3"
+    },
     "ops": [
-      { "type": "copy", "src": "dw_talents/disjunctive_substitution.tph", "dest": "dw_talents/sfo/disjunctive_substitution.tph" },
-      { "type": "copy", "src": "dw_talents/lib_spl.tph", "dest": "dw_talents/sfo/lib_spl.tph" },
-      { "type": "copy", "src": "dw_talents/reroute_stats.tph", "dest": "dw_talents/lib/reroute_stats.tph" },
-      { "type": "copy", "src": "dw_talents/alter_script.tph", "dest": "dw_talents/sfo/alter_script.tph" }
-    ]
+      {
+        "type": "copy",
+        "src": "dw_talents/disjunctive_substitution.tph",
+        "dest": "dw_talents/sfo/disjunctive_substitution.tph"
+      },
+      {
+        "type": "copy",
+        "src": "dw_talents/lib_spl.tph",
+        "dest": "dw_talents/sfo/lib_spl.tph"
+      },
+      {
+        "type": "copy",
+        "src": "dw_talents/reroute_stats.tph",
+        "dest": "dw_talents/lib/reroute_stats.tph"
+      },
+      {
+        "type": "copy",
+        "src": "dw_talents/alter_script.tph",
+        "dest": "dw_talents/sfo/alter_script.tph"
+      }
+    ],
+    "recommended": true,
+    "category": "bugfix"
   },
   {
     "id": 2,
-    "name": "Talents of Faerun — IWD Spell Fixes",
+    "name": "Talents of Faerun \u00e2\u20ac\u201d IWD Spell Fixes",
     "description": "Fixes 768-byte idpro313.pro copyover in cd_arcane_post",
     "target_mod": "dw_talents",
-    "trigger": { "type": "dir_exists", "path": "dw_talents/iwdspells" },
-    "marker": { "file": "dw_talents/iwdspells/lib/cd_arcane_post.tpa", "text": "copyover/WIZARD_LANCE_OF_DISRUPTION" },
+    "trigger": {
+      "type": "dir_exists",
+      "path": "dw_talents/iwdspells"
+    },
+    "marker": {
+      "file": "dw_talents/iwdspells/lib/cd_arcane_post.tpa",
+      "text": "copyover/WIZARD_LANCE_OF_DISRUPTION"
+    },
     "ops": [
-      { "type": "copy", "src": "dw_talents/cd_arcane_post.tpa", "dest": "dw_talents/iwdspells/lib/cd_arcane_post.tpa" }
-    ]
+      {
+        "type": "copy",
+        "src": "dw_talents/cd_arcane_post.tpa",
+        "dest": "dw_talents/iwdspells/lib/cd_arcane_post.tpa"
+      }
+    ],
+    "recommended": true,
+    "category": "bugfix"
   },
   {
     "id": 3,
-    "name": "Talents of Faerun — UI Fixes (HLAs and Subraces)",
+    "name": "Talents of Faerun \u00e2\u20ac\u201d UI Fixes (HLAs and Subraces)",
     "description": "HLA regex narrowing, IS_AN_INT guard for subrace UI",
     "target_mod": "dw_talents",
-    "trigger": { "type": "dir_exists", "path": "dw_talents/sfo/lua" },
-    "marker": { "file": "dw_talents/sfo/lua/ui_add_subraces.tph", "text": "IS_AN_INT" },
+    "trigger": {
+      "type": "dir_exists",
+      "path": "dw_talents/sfo/lua"
+    },
+    "marker": {
+      "file": "dw_talents/sfo/lua/ui_add_subraces.tph",
+      "text": "IS_AN_INT"
+    },
     "ops": [
-      { "type": "copy", "src": "dw_talents/ui_externalize_hlas.tph", "dest": "dw_talents/sfo/lua/ui_externalize_hlas.tph" },
-      { "type": "copy", "src": "dw_talents/ui_add_subraces.tph", "dest": "dw_talents/sfo/lua/ui_add_subraces.tph" }
-    ]
+      {
+        "type": "copy",
+        "src": "dw_talents/ui_externalize_hlas.tph",
+        "dest": "dw_talents/sfo/lua/ui_externalize_hlas.tph"
+      },
+      {
+        "type": "copy",
+        "src": "dw_talents/ui_add_subraces.tph",
+        "dest": "dw_talents/sfo/lua/ui_add_subraces.tph"
+      }
+    ],
+    "recommended": true,
+    "category": "cosmetic"
   },
   {
     "id": 4,
-    "name": "Sword Coast Stratagems — SFO Library Fixes",
+    "name": "Sword Coast Stratagems \u00e2\u20ac\u201d SFO Library Fixes",
     "description": "Same SFO fixes as ToF for SCS's copy of the library",
     "target_mod": "stratagems",
-    "trigger": { "type": "dir_exists", "path": "stratagems" },
-    "marker": { "file": "stratagems/sfo2e/disjunctive_substitution.tph", "text": "STRING_EQUAL_CASE ~C#AJAN~" },
+    "trigger": {
+      "type": "dir_exists",
+      "path": "stratagems"
+    },
+    "marker": {
+      "file": "stratagems/sfo2e/alter_script.tph",
+      "text": "_eetmr_bcs_prefilter_v3"
+    },
     "ops": [
-      { "type": "copy", "src": "stratagems/disjunctive_substitution.tph", "dest": "stratagems/sfo2e/disjunctive_substitution.tph" },
-      { "type": "copy", "src": "stratagems/lib_spl.tph", "dest": "stratagems/sfo2e/lib_spl.tph" },
-      { "type": "copy", "src": "stratagems/alter_script.tph", "dest": "stratagems/sfo2e/alter_script.tph" },
-      { "type": "copy", "src": "stratagems/ui_externalize_hlas.tph", "dest": "stratagems/sfo2e/lua/ui_externalize_hlas.tph" },
-      { "type": "copy", "src": "stratagems/ui_add_subraces.tph", "dest": "stratagems/sfo2e/lua/ui_add_subraces.tph" }
-    ]
+      {
+        "type": "copy",
+        "src": "stratagems/disjunctive_substitution.tph",
+        "dest": "stratagems/sfo2e/disjunctive_substitution.tph"
+      },
+      {
+        "type": "copy",
+        "src": "stratagems/lib_spl.tph",
+        "dest": "stratagems/sfo2e/lib_spl.tph"
+      },
+      {
+        "type": "copy",
+        "src": "stratagems/alter_script.tph",
+        "dest": "stratagems/sfo2e/alter_script.tph"
+      },
+      {
+        "type": "copy",
+        "src": "stratagems/ui_externalize_hlas.tph",
+        "dest": "stratagems/sfo2e/lua/ui_externalize_hlas.tph"
+      },
+      {
+        "type": "copy",
+        "src": "stratagems/ui_add_subraces.tph",
+        "dest": "stratagems/sfo2e/lua/ui_add_subraces.tph"
+      }
+    ],
+    "recommended": true,
+    "category": "bugfix"
   },
   {
     "id": 5,
-    "name": "Sword Coast Stratagems — IWD Spell Fixes",
+    "name": "Sword Coast Stratagems \u00e2\u20ac\u201d IWD Spell Fixes",
     "description": "Fixes idpro313.pro copyover in SCS IWD spells",
     "target_mod": "stratagems",
-    "trigger": { "type": "dir_exists", "path": "stratagems/iwdspells" },
-    "marker": { "file": "stratagems/iwdspells/lib/cd_arcane_post.tpa", "text": "obg2_res/idpro313.pro" },
+    "trigger": {
+      "type": "dir_exists",
+      "path": "stratagems/iwdspells"
+    },
+    "marker": {
+      "file": "stratagems/iwdspells/lib/cd_arcane_post.tpa",
+      "text": "obg2_res/idpro313.pro"
+    },
     "ops": [
-      { "type": "copy", "src": "stratagems/cd_arcane_post.tpa", "dest": "stratagems/iwdspells/lib/cd_arcane_post.tpa" }
-    ]
+      {
+        "type": "copy",
+        "src": "stratagems/cd_arcane_post.tpa",
+        "dest": "stratagems/iwdspells/lib/cd_arcane_post.tpa"
+      }
+    ],
+    "recommended": true,
+    "category": "bugfix"
   },
   {
     "id": 6,
-    "name": "IWDification — SFO Library Fixes",
+    "name": "IWDification \u00e2\u20ac\u201d SFO Library Fixes",
     "description": "SFO library + IWD spell fixes for IWDification's bundled copy",
     "target_mod": "IWDification",
-    "trigger": { "type": "dir_exists", "path": "IWDification" },
-    "marker": { "file": "IWDification/sfo/disjunctive_substitution.tph", "text": "STRING_EQUAL_CASE ~C#AJAN~" },
+    "trigger": {
+      "type": "dir_exists",
+      "path": "IWDification"
+    },
+    "marker": {
+      "file": "IWDification/sfo/alter_script.tph",
+      "text": "_eetmr_bcs_prefilter_v3"
+    },
     "ops": [
-      { "type": "copy", "src": "iwdification/disjunctive_substitution.tph", "dest": "IWDification/sfo/disjunctive_substitution.tph" },
-      { "type": "copy", "src": "iwdification/lib_spl.tph", "dest": "IWDification/sfo/lib_spl.tph" },
-      { "type": "copy", "src": "iwdification/alter_script.tph", "dest": "IWDification/sfo/alter_script.tph" },
-      { "type": "copy", "src": "iwdification/ui_externalize_hlas.tph", "dest": "IWDification/sfo/lua/ui_externalize_hlas.tph" },
-      { "type": "copy", "src": "iwdification/ui_add_subraces.tph", "dest": "IWDification/sfo/lua/ui_add_subraces.tph" },
-      { "type": "copy", "src": "iwdification/cd_arcane_post.tpa", "dest": "IWDification/iwdspells/lib/cd_arcane_post.tpa" }
-    ]
+      {
+        "type": "copy",
+        "src": "iwdification/disjunctive_substitution.tph",
+        "dest": "IWDification/sfo/disjunctive_substitution.tph"
+      },
+      {
+        "type": "copy",
+        "src": "iwdification/lib_spl.tph",
+        "dest": "IWDification/sfo/lib_spl.tph"
+      },
+      {
+        "type": "copy",
+        "src": "iwdification/alter_script.tph",
+        "dest": "IWDification/sfo/alter_script.tph"
+      },
+      {
+        "type": "copy",
+        "src": "iwdification/ui_externalize_hlas.tph",
+        "dest": "IWDification/sfo/lua/ui_externalize_hlas.tph"
+      },
+      {
+        "type": "copy",
+        "src": "iwdification/ui_add_subraces.tph",
+        "dest": "IWDification/sfo/lua/ui_add_subraces.tph"
+      },
+      {
+        "type": "copy",
+        "src": "iwdification/cd_arcane_post.tpa",
+        "dest": "IWDification/iwdspells/lib/cd_arcane_post.tpa"
+      }
+    ],
+    "recommended": true,
+    "category": "bugfix"
   },
   {
     "id": 7,
-    "name": "Made in Heaven Fixes — SFO Library Fixes",
+    "name": "Made in Heaven Fixes \u00e2\u20ac\u201d SFO Library Fixes",
     "description": "SFO library fixes for MiH FR's third_party copy",
     "target_mod": "mih_fr",
-    "trigger": { "type": "dir_exists", "path": "mih_fr" },
-    "marker": { "file": "mih_fr/third_party/sfo2e/disjunctive_substitution.tph", "text": "STRING_EQUAL_CASE ~C#AJAN~" },
+    "trigger": {
+      "type": "dir_exists",
+      "path": "mih_fr"
+    },
+    "marker": {
+      "file": "mih_fr/third_party/sfo2e/alter_script.tph",
+      "text": "_eetmr_bcs_prefilter_v3"
+    },
     "ops": [
-      { "type": "copy", "src": "mih_fr/disjunctive_substitution.tph", "dest": "mih_fr/third_party/sfo2e/disjunctive_substitution.tph" },
-      { "type": "copy", "src": "mih_fr/lib_spl.tph", "dest": "mih_fr/third_party/sfo2e/lib_spl.tph" },
-      { "type": "copy", "src": "mih_fr/alter_script.tph", "dest": "mih_fr/third_party/sfo2e/alter_script.tph" },
-      { "type": "copy", "src": "mih_fr/ui_externalize_hlas.tph", "dest": "mih_fr/third_party/sfo2e/lua/ui_externalize_hlas.tph" },
-      { "type": "copy", "src": "mih_fr/ui_add_subraces.tph", "dest": "mih_fr/third_party/sfo2e/lua/ui_add_subraces.tph" }
-    ]
+      {
+        "type": "copy",
+        "src": "mih_fr/disjunctive_substitution.tph",
+        "dest": "mih_fr/third_party/sfo2e/disjunctive_substitution.tph"
+      },
+      {
+        "type": "copy",
+        "src": "mih_fr/lib_spl.tph",
+        "dest": "mih_fr/third_party/sfo2e/lib_spl.tph"
+      },
+      {
+        "type": "copy",
+        "src": "mih_fr/alter_script.tph",
+        "dest": "mih_fr/third_party/sfo2e/alter_script.tph"
+      },
+      {
+        "type": "copy",
+        "src": "mih_fr/ui_externalize_hlas.tph",
+        "dest": "mih_fr/third_party/sfo2e/lua/ui_externalize_hlas.tph"
+      },
+      {
+        "type": "copy",
+        "src": "mih_fr/ui_add_subraces.tph",
+        "dest": "mih_fr/third_party/sfo2e/lua/ui_add_subraces.tph"
+      }
+    ],
+    "recommended": true,
+    "category": "bugfix"
   },
   {
     "id": 8,
-    "name": "Made in Heaven Spell Pack — SFO Library Fixes",
+    "name": "Made in Heaven Spell Pack \u00e2\u20ac\u201d SFO Library Fixes",
     "description": "SFO library + IWD spell fixes for MiH SP",
     "target_mod": "mih_sp",
-    "trigger": { "type": "dir_exists", "path": "mih_sp" },
-    "marker": { "file": "mih_sp/third_party/sfo2e/disjunctive_substitution.tph", "text": "STRING_EQUAL_CASE ~C#AJAN~" },
+    "trigger": {
+      "type": "dir_exists",
+      "path": "mih_sp"
+    },
+    "marker": {
+      "file": "mih_sp/third_party/sfo2e/alter_script.tph",
+      "text": "_eetmr_bcs_prefilter_v3"
+    },
     "ops": [
-      { "type": "copy", "src": "mih_sp/disjunctive_substitution.tph", "dest": "mih_sp/third_party/sfo2e/disjunctive_substitution.tph" },
-      { "type": "copy", "src": "mih_sp/lib_spl.tph", "dest": "mih_sp/third_party/sfo2e/lib_spl.tph" },
-      { "type": "copy", "src": "mih_sp/alter_script.tph", "dest": "mih_sp/third_party/sfo2e/alter_script.tph" },
-      { "type": "copy", "src": "mih_sp/cd_arcane_post.tpa", "dest": "mih_sp/third_party/iwdspells/lib/cd_arcane_post.tpa" },
-      { "type": "copy", "src": "mih_sp/ui_externalize_hlas.tph", "dest": "mih_sp/third_party/sfo2e/lua/ui_externalize_hlas.tph" },
-      { "type": "copy", "src": "mih_sp/ui_add_subraces.tph", "dest": "mih_sp/third_party/sfo2e/lua/ui_add_subraces.tph" }
-    ]
+      {
+        "type": "copy",
+        "src": "mih_sp/disjunctive_substitution.tph",
+        "dest": "mih_sp/third_party/sfo2e/disjunctive_substitution.tph"
+      },
+      {
+        "type": "copy",
+        "src": "mih_sp/lib_spl.tph",
+        "dest": "mih_sp/third_party/sfo2e/lib_spl.tph"
+      },
+      {
+        "type": "copy",
+        "src": "mih_sp/alter_script.tph",
+        "dest": "mih_sp/third_party/sfo2e/alter_script.tph"
+      },
+      {
+        "type": "copy",
+        "src": "mih_sp/cd_arcane_post.tpa",
+        "dest": "mih_sp/third_party/iwdspells/lib/cd_arcane_post.tpa"
+      },
+      {
+        "type": "copy",
+        "src": "mih_sp/ui_externalize_hlas.tph",
+        "dest": "mih_sp/third_party/sfo2e/lua/ui_externalize_hlas.tph"
+      },
+      {
+        "type": "copy",
+        "src": "mih_sp/ui_add_subraces.tph",
+        "dest": "mih_sp/third_party/sfo2e/lua/ui_add_subraces.tph"
+      }
+    ],
+    "recommended": true,
+    "category": "bugfix"
   },
   {
     "id": 9,
-    "name": "Made in Heaven Meta-Mod — SFO Library Fixes",
+    "name": "Made in Heaven Meta-Mod \u00e2\u20ac\u201d SFO Library Fixes",
     "description": "SFO library fixes for MiH Meta-Mod's third_party copy",
     "target_mod": "mih_metamod",
-    "trigger": { "type": "dir_exists", "path": "mih_metamod" },
-    "marker": { "file": "mih_metamod/third_party/sfo2e/disjunctive_substitution.tph", "text": "STRING_EQUAL_CASE ~C#AJAN~" },
+    "trigger": {
+      "type": "dir_exists",
+      "path": "mih_metamod"
+    },
+    "marker": {
+      "file": "mih_metamod/third_party/sfo2e/alter_script.tph",
+      "text": "_eetmr_bcs_prefilter_v3"
+    },
     "ops": [
-      { "type": "copy", "src": "mih_metamod/disjunctive_substitution.tph", "dest": "mih_metamod/third_party/sfo2e/disjunctive_substitution.tph" },
-      { "type": "copy", "src": "mih_metamod/lib_spl.tph", "dest": "mih_metamod/third_party/sfo2e/lib_spl.tph" },
-      { "type": "copy", "src": "mih_metamod/alter_script.tph", "dest": "mih_metamod/third_party/sfo2e/alter_script.tph" },
-      { "type": "copy", "src": "mih_metamod/ui_externalize_hlas.tph", "dest": "mih_metamod/third_party/sfo2e/lua/ui_externalize_hlas.tph" },
-      { "type": "copy", "src": "mih_metamod/ui_add_subraces.tph", "dest": "mih_metamod/third_party/sfo2e/lua/ui_add_subraces.tph" }
-    ]
+      {
+        "type": "copy",
+        "src": "mih_metamod/disjunctive_substitution.tph",
+        "dest": "mih_metamod/third_party/sfo2e/disjunctive_substitution.tph"
+      },
+      {
+        "type": "copy",
+        "src": "mih_metamod/lib_spl.tph",
+        "dest": "mih_metamod/third_party/sfo2e/lib_spl.tph"
+      },
+      {
+        "type": "copy",
+        "src": "mih_metamod/alter_script.tph",
+        "dest": "mih_metamod/third_party/sfo2e/alter_script.tph"
+      },
+      {
+        "type": "copy",
+        "src": "mih_metamod/ui_externalize_hlas.tph",
+        "dest": "mih_metamod/third_party/sfo2e/lua/ui_externalize_hlas.tph"
+      },
+      {
+        "type": "copy",
+        "src": "mih_metamod/ui_add_subraces.tph",
+        "dest": "mih_metamod/third_party/sfo2e/lua/ui_add_subraces.tph"
+      }
+    ],
+    "recommended": true,
+    "category": "bugfix"
   },
   {
     "id": 10,
-    "name": "Akun's Gear — EET Compatibility Fix",
+    "name": "Akun's Gear \u00e2\u20ac\u201d EET Compatibility Fix",
     "description": "Removes bg2ee from incompatible games list",
     "target_mod": "akgear",
-    "trigger": { "type": "file_exists", "path": "akgear/laf/errors/!_CheckIEgames.tpa" },
-    "marker": { "file": "akgear/laf/errors/!_CheckIEgames.tpa", "text": "EET compat" },
+    "trigger": {
+      "type": "file_exists",
+      "path": "akgear/laf/errors/!_CheckIEgames.tpa"
+    },
+    "marker": {
+      "file": "akgear/laf/errors/!_CheckIEgames.tpa",
+      "text": "EET compat"
+    },
     "ops": [
-      { "type": "replace", "file": "akgear/laf/errors/!_CheckIEgames.tpa", "find": "~bg2ee~", "replace": "//~bg2ee~ // EET compat: removed from incompatible list" }
-    ]
+      {
+        "type": "replace",
+        "file": "akgear/laf/errors/!_CheckIEgames.tpa",
+        "find": "~bg2ee~",
+        "replace": "//~bg2ee~ // EET compat: removed from incompatible list"
+      }
+    ],
+    "recommended": true,
+    "category": "compat"
   },
   {
     "id": 11,
-    "name": "Angelo — ALWAYS Block Guard Fix",
+    "name": "Angelo \u00e2\u20ac\u201d ALWAYS Block Guard Fix",
     "description": "Changes shared bg2_chapter guard to sv_angelo_always",
     "target_mod": "angelo",
-    "trigger": { "type": "file_exists", "path": "angelo/setup-angelo.tp2" },
-    "marker": { "file": "angelo/setup-angelo.tp2", "text": "sv_angelo_always" },
+    "trigger": {
+      "type": "file_exists",
+      "path": "angelo/setup-angelo.tp2"
+    },
+    "marker": {
+      "file": "angelo/setup-angelo.tp2",
+      "text": "sv_angelo_always"
+    },
     "ops": [
-      { "type": "copy", "src": "angelo/setup-angelo.tp2", "dest": "angelo/setup-angelo.tp2" }
-    ]
+      {
+        "type": "copy",
+        "src": "angelo/setup-angelo.tp2",
+        "dest": "angelo/setup-angelo.tp2"
+      }
+    ],
+    "recommended": true,
+    "category": "bugfix"
   },
   {
     "id": 12,
-    "name": "Bardic Wonders — BCS Decompile Guard",
+    "name": "Bardic Wonders \u00e2\u20ac\u201d BCS Decompile Guard",
     "description": "Adds BDAERIEC exclusion to BCS decompile loop",
     "target_mod": "BardicWonders",
-    "trigger": { "type": "file_exists", "path": "BardicWonders/lib/bardsongtweaks.tpa" },
-    "marker": { "file": "BardicWonders/lib/bardsongtweaks.tpa", "text": "BDAERIEC" },
+    "trigger": {
+      "type": "file_exists",
+      "path": "BardicWonders/lib/bardsongtweaks.tpa"
+    },
+    "marker": {
+      "file": "BardicWonders/lib/bardsongtweaks.tpa",
+      "text": "BDAERIEC"
+    },
     "ops": [
-      { "type": "copy", "src": "bardicwonders/bardsongtweaks.tpa", "dest": "BardicWonders/lib/bardsongtweaks.tpa" }
-    ]
+      {
+        "type": "copy",
+        "src": "bardicwonders/bardsongtweaks.tpa",
+        "dest": "BardicWonders/lib/bardsongtweaks.tpa"
+      }
+    ],
+    "recommended": true,
+    "category": "bugfix"
   },
   {
     "id": 13,
-    "name": "Boards of Magick — CRE Filename Case Fix",
+    "name": "Boards of Magick \u00e2\u20ac\u201d CRE Filename Case Fix",
     "description": "Renames O!Tal.cre to O!TAL.cre for case-sensitive systems",
     "target_mod": "BoM",
-    "trigger": { "type": "dir_exists", "path": "BoM/Setup-BoM/cre" },
-    "marker": { "file": "BoM/Setup-BoM/cre/O!TAL.cre", "text": null },
+    "trigger": {
+      "type": "dir_exists",
+      "path": "BoM/Setup-BoM/cre"
+    },
+    "marker": {
+      "file": "BoM/Setup-BoM/cre/O!TAL.cre",
+      "text": null
+    },
     "ops": [
-      { "type": "rename", "from": "BoM/Setup-BoM/cre/O!Tal.cre", "to": "BoM/Setup-BoM/cre/O!TAL.cre" }
-    ]
+      {
+        "type": "rename",
+        "from": "BoM/Setup-BoM/cre/O!Tal.cre",
+        "to": "BoM/Setup-BoM/cre/O!TAL.cre"
+      }
+    ],
+    "recommended": true,
+    "category": "compat"
   },
   {
     "id": 14,
-    "name": "BuTcHeRy — ALWAYS Block Guard Fix",
+    "name": "BuTcHeRy \u00e2\u20ac\u201d ALWAYS Block Guard Fix",
     "description": "Changes shared bg2_chapter guard to d9_butchery_always",
     "target_mod": "butchery",
-    "trigger": { "type": "file_exists", "path": "butchery/lib/always.tph" },
-    "marker": { "file": "butchery/lib/always.tph", "text": "d9_butchery_always" },
+    "trigger": {
+      "type": "file_exists",
+      "path": "butchery/lib/always.tph"
+    },
+    "marker": {
+      "file": "butchery/lib/always.tph",
+      "text": "d9_butchery_always"
+    },
     "ops": [
-      { "type": "copy", "src": "butchery/always.tph", "dest": "butchery/lib/always.tph" }
-    ]
+      {
+        "type": "copy",
+        "src": "butchery/always.tph",
+        "dest": "butchery/lib/always.tph"
+      }
+    ],
+    "recommended": true,
+    "category": "bugfix"
   },
   {
     "id": 15,
-    "name": "Ehlastra — Translation Path Fix",
-    "description": "Fixes translation path (wheels/tra → wheels/lang)",
+    "name": "Ehlastra \u00e2\u20ac\u201d Translation Path Fix",
+    "description": "Fixes translation path (wheels/tra \u00e2\u2020\u2019 wheels/lang)",
     "target_mod": "Ehlastra",
-    "trigger": { "type": "file_exists", "path": "Ehlastra/Ehlastra.tp2" },
-    "marker": { "file": "Ehlastra/Ehlastra.tp2", "text": "wheels/lang/%s/balthadd.tra" },
+    "trigger": {
+      "type": "file_exists",
+      "path": "Ehlastra/Ehlastra.tp2"
+    },
+    "marker": {
+      "file": "Ehlastra/Ehlastra.tp2",
+      "text": "wheels/lang/%s/balthadd.tra"
+    },
     "ops": [
-      { "type": "replace", "file": "Ehlastra/Ehlastra.tp2", "find": "wheels/tra/%s/balthadd.tra", "replace": "wheels/lang/%s/balthadd.tra" }
-    ]
+      {
+        "type": "replace",
+        "file": "Ehlastra/Ehlastra.tp2",
+        "find": "wheels/tra/%s/balthadd.tra",
+        "replace": "wheels/lang/%s/balthadd.tra"
+      }
+    ],
+    "recommended": true,
+    "category": "compat"
   },
   {
     "id": 16,
-    "name": "Kale — Isaac Crossmod Removal",
+    "name": "Kale \u00e2\u20ac\u201d Isaac Crossmod Removal",
     "description": "Removes unreleased X3Isaac NPC crossmod references from Emily.d",
     "target_mod": "Kale",
-    "trigger": { "type": "file_exists", "path": "Kale/Dialogue/CrossMod/Emily.d" },
-    "marker": { "file": "Kale/Dialogue/CrossMod/Emily.d", "text": "X3Isaac", "invert": true },
+    "trigger": {
+      "type": "file_exists",
+      "path": "Kale/Dialogue/CrossMod/Emily.d"
+    },
+    "marker": {
+      "file": "Kale/Dialogue/CrossMod/Emily.d",
+      "text": "X3Isaac",
+      "invert": true
+    },
     "ops": [
-      { "type": "copy", "src": "kale/Emily.d", "dest": "Kale/Dialogue/CrossMod/Emily.d" }
-    ]
+      {
+        "type": "copy",
+        "src": "kale/Emily.d",
+        "dest": "Kale/Dialogue/CrossMod/Emily.d"
+      }
+    ],
+    "recommended": true,
+    "category": "compat"
   },
   {
     "id": 17,
-    "name": "Longer Road — Jaheira Script Fix",
+    "name": "Longer Road \u00e2\u20ac\u201d Jaheira Script Fix",
     "description": "Removes JAH_NO_JON REPLACE_BCS_BLOCK that fails with Jaheira Recast",
     "target_mod": "LongerRoad",
-    "trigger": { "type": "file_exists", "path": "LongerRoad/LongerRoad.tp2" },
-    "marker": { "file": "LongerRoad/LongerRoad.tp2", "text": "JAH_NO_JON", "invert": true },
+    "trigger": {
+      "type": "file_exists",
+      "path": "LongerRoad/LongerRoad.tp2"
+    },
+    "marker": {
+      "file": "LongerRoad/LongerRoad.tp2",
+      "text": "JAH_NO_JON",
+      "invert": true
+    },
     "ops": [
-      { "type": "copy", "src": "longerroad/LongerRoad.tp2", "dest": "LongerRoad/LongerRoad.tp2" }
-    ]
+      {
+        "type": "copy",
+        "src": "longerroad/LongerRoad.tp2",
+        "dest": "LongerRoad/LongerRoad.tp2"
+      }
+    ],
+    "recommended": true,
+    "category": "bugfix"
   },
   {
     "id": 18,
-    "name": "The Darkest Day — Spell Reference Fix",
+    "name": "The Darkest Day \u00e2\u20ac\u201d Spell Reference Fix",
     "description": "Replaces SUMMON_SKELETON_WARRIOR3 with CLERIC_ANIMATE_DEAD",
     "target_mod": "TDDz",
-    "trigger": { "type": "file_exists", "path": "TDDz/_ONSETOfTheDARKESTDAY/BAF/DDGAME03.BAF" },
-    "marker": { "file": "TDDz/_ONSETOfTheDARKESTDAY/BAF/DDGAME03.BAF", "text": "CLERIC_ANIMATE_DEAD" },
+    "trigger": {
+      "type": "file_exists",
+      "path": "TDDz/_ONSETOfTheDARKESTDAY/BAF/DDGAME03.BAF"
+    },
+    "marker": {
+      "file": "TDDz/_ONSETOfTheDARKESTDAY/BAF/DDGAME03.BAF",
+      "text": "CLERIC_ANIMATE_DEAD"
+    },
     "ops": [
-      { "type": "replace", "file": "TDDz/_ONSETOfTheDARKESTDAY/BAF/DDGAME03.BAF", "find": "SUMMON_SKELETON_WARRIOR3", "replace": "CLERIC_ANIMATE_DEAD" }
-    ]
+      {
+        "type": "replace",
+        "file": "TDDz/_ONSETOfTheDARKESTDAY/BAF/DDGAME03.BAF",
+        "find": "SUMMON_SKELETON_WARRIOR3",
+        "replace": "CLERIC_ANIMATE_DEAD"
+      }
+    ],
+    "recommended": true,
+    "category": "bugfix"
   },
   {
     "id": 19,
-    "name": "Shades of the Sword Coast — CRE Filename Fix",
+    "name": "Shades of the Sword Coast \u00e2\u20ac\u201d CRE Filename Fix",
     "description": "Renames spidsm01.cre to SPIDSM0_.cre (upstream filename mismatch)",
     "target_mod": "SotSC",
-    "trigger": { "type": "dir_exists", "path": "SotSC/NoSoDFixes" },
-    "marker": { "file": "SotSC/NoSoDFixes/SPIDSM0_.cre", "text": null },
+    "trigger": {
+      "type": "dir_exists",
+      "path": "SotSC/NoSoDFixes"
+    },
+    "marker": {
+      "file": "SotSC/NoSoDFixes/SPIDSM0_.cre",
+      "text": null
+    },
     "ops": [
-      { "type": "rename", "from": "SotSC/NoSoDFixes/spidsm01.cre", "to": "SotSC/NoSoDFixes/SPIDSM0_.cre" }
-    ]
+      {
+        "type": "rename",
+        "from": "SotSC/NoSoDFixes/spidsm01.cre",
+        "to": "SotSC/NoSoDFixes/SPIDSM0_.cre"
+      }
+    ],
+    "recommended": true,
+    "category": "compat"
   },
   {
     "id": 20,
-    "name": "Shadow Magic — Pre-copy Resource Files",
+    "name": "Shadow Magic \u00e2\u20ac\u201d Pre-copy Resource Files",
     "description": "Pre-copies MEWI*.txt files to game override/ for ClassSpellTool",
     "target_mod": "shadowadept",
-    "trigger": { "type": "dir_exists", "path": "shadowadept/no_overwrite" },
-    "marker": { "file": null, "text": null, "check_game_file": "override/MEWI1.txt" },
+    "trigger": {
+      "type": "dir_exists",
+      "path": "shadowadept/no_overwrite"
+    },
+    "marker": {
+      "file": null,
+      "text": null,
+      "check_game_file": "override/MEWI1.txt"
+    },
     "ops": [
-      { "type": "copy_to_game", "src_mod": "shadowadept/no_overwrite/MEWI1.txt", "dest_game": "override/MEWI1.txt" },
-      { "type": "copy_to_game", "src_mod": "shadowadept/no_overwrite/MEWI2.txt", "dest_game": "override/MEWI2.txt" },
-      { "type": "copy_to_game", "src_mod": "shadowadept/no_overwrite/MEWI3.txt", "dest_game": "override/MEWI3.txt" },
-      { "type": "copy_to_game", "src_mod": "shadowadept/no_overwrite/MEWI4.txt", "dest_game": "override/MEWI4.txt" },
-      { "type": "copy_to_game", "src_mod": "shadowadept/no_overwrite/MEWI5.txt", "dest_game": "override/MEWI5.txt" },
-      { "type": "copy_to_game", "src_mod": "shadowadept/no_overwrite/MEWI6.txt", "dest_game": "override/MEWI6.txt" },
-      { "type": "copy_to_game", "src_mod": "shadowadept/no_overwrite/MEWI7.txt", "dest_game": "override/MEWI7.txt" },
-      { "type": "copy_to_game", "src_mod": "shadowadept/no_overwrite/MEWI8.txt", "dest_game": "override/MEWI8.txt" },
-      { "type": "copy_to_game", "src_mod": "shadowadept/no_overwrite/MEWI9.txt", "dest_game": "override/MEWI9.txt" }
-    ]
+      {
+        "type": "copy_to_game",
+        "src_mod": "shadowadept/no_overwrite/MEWI1.txt",
+        "dest_game": "override/MEWI1.txt"
+      },
+      {
+        "type": "copy_to_game",
+        "src_mod": "shadowadept/no_overwrite/MEWI2.txt",
+        "dest_game": "override/MEWI2.txt"
+      },
+      {
+        "type": "copy_to_game",
+        "src_mod": "shadowadept/no_overwrite/MEWI3.txt",
+        "dest_game": "override/MEWI3.txt"
+      },
+      {
+        "type": "copy_to_game",
+        "src_mod": "shadowadept/no_overwrite/MEWI4.txt",
+        "dest_game": "override/MEWI4.txt"
+      },
+      {
+        "type": "copy_to_game",
+        "src_mod": "shadowadept/no_overwrite/MEWI5.txt",
+        "dest_game": "override/MEWI5.txt"
+      },
+      {
+        "type": "copy_to_game",
+        "src_mod": "shadowadept/no_overwrite/MEWI6.txt",
+        "dest_game": "override/MEWI6.txt"
+      },
+      {
+        "type": "copy_to_game",
+        "src_mod": "shadowadept/no_overwrite/MEWI7.txt",
+        "dest_game": "override/MEWI7.txt"
+      },
+      {
+        "type": "copy_to_game",
+        "src_mod": "shadowadept/no_overwrite/MEWI8.txt",
+        "dest_game": "override/MEWI8.txt"
+      },
+      {
+        "type": "copy_to_game",
+        "src_mod": "shadowadept/no_overwrite/MEWI9.txt",
+        "dest_game": "override/MEWI9.txt"
+      }
+    ],
+    "recommended": true,
+    "category": "bugfix"
   },
   {
     "id": 21,
-    "name": "Breagar (ACBre) — EET English Language Fix",
+    "name": "Breagar (ACBre) \u00e2\u20ac\u201d EET English Language Fix",
     "description": "Uses hardcoded state numbers instead of STATE_WHICH_SAYS for EET",
     "target_mod": "ACBre",
-    "trigger": { "type": "file_exists", "path": "ACBre/lib/ac_bre_cpmvars.tpa" },
-    "marker": { "file": "ACBre/lib/ac_bre_cpmvars.tpa", "text": "EET preserves BGEE" },
+    "trigger": {
+      "type": "file_exists",
+      "path": "ACBre/lib/ac_bre_cpmvars.tpa"
+    },
+    "marker": {
+      "file": "ACBre/lib/ac_bre_cpmvars.tpa",
+      "text": "EET preserves BGEE"
+    },
     "ops": [
-      { "type": "copy", "src": "acbre/ac_bre_cpmvars.tpa", "dest": "ACBre/lib/ac_bre_cpmvars.tpa" }
-    ]
+      {
+        "type": "copy",
+        "src": "acbre/ac_bre_cpmvars.tpa",
+        "dest": "ACBre/lib/ac_bre_cpmvars.tpa"
+      }
+    ],
+    "recommended": true,
+    "category": "compat"
   },
   {
     "id": 22,
-    "name": "Made in Heaven Spell Pack — Animate Dead Scrolls Fix",
+    "name": "Made in Heaven Spell Pack \u00e2\u20ac\u201d Animate Dead Scrolls Fix",
     "description": "LAUNCH_PATCH_FUNCTION replaced with LPF for struct_read",
     "target_mod": "mih_sp",
-    "trigger": { "type": "file_exists", "path": "mih_sp/animate_dead/animate_dead_scrolls.tpa" },
-    "marker": { "file": "mih_sp/animate_dead/animate_dead_scrolls.tpa", "text": "LPF struct_read" },
+    "trigger": {
+      "type": "file_exists",
+      "path": "mih_sp/animate_dead/animate_dead_scrolls.tpa"
+    },
+    "marker": {
+      "file": "mih_sp/animate_dead/animate_dead_scrolls.tpa",
+      "text": "LPF struct_read"
+    },
     "ops": [
-      { "type": "copy", "src": "mih_sp_animate_dead/animate_dead_scrolls.tpa", "dest": "mih_sp/animate_dead/animate_dead_scrolls.tpa" }
-    ]
+      {
+        "type": "copy",
+        "src": "mih_sp_animate_dead/animate_dead_scrolls.tpa",
+        "dest": "mih_sp/animate_dead/animate_dead_scrolls.tpa"
+      }
+    ],
+    "recommended": true,
+    "category": "bugfix"
   },
   {
     "id": 23,
-    "name": "Trials of the Luremaster — Container Bounds Fix",
+    "name": "Trials of the Luremaster \u00e2\u20ac\u201d Container Bounds Fix",
     "description": "Adds container count bounds check in spells_player.tph",
     "target_mod": "A7-TotLM-BG2EE",
-    "trigger": { "type": "file_exists", "path": "A7-TotLM-BG2EE/lib/spells_player.tph" },
-    "marker": { "file": "A7-TotLM-BG2EE/lib/spells_player.tph", "text": "are_container_count" },
+    "trigger": {
+      "type": "file_exists",
+      "path": "A7-TotLM-BG2EE/lib/spells_player.tph"
+    },
+    "marker": {
+      "file": "A7-TotLM-BG2EE/lib/spells_player.tph",
+      "text": "are_container_count"
+    },
     "ops": [
-      { "type": "copy", "src": "A7-TotLM-BG2EE/spells_player.tph", "dest": "A7-TotLM-BG2EE/lib/spells_player.tph" }
-    ]
+      {
+        "type": "copy",
+        "src": "A7-TotLM-BG2EE/spells_player.tph",
+        "dest": "A7-TotLM-BG2EE/lib/spells_player.tph"
+      }
+    ],
+    "recommended": true,
+    "category": "bugfix"
   },
   {
     "id": 24,
-    "name": "Portraits Directory — Create Missing Directory",
+    "name": "Portraits Directory \u00e2\u20ac\u201d Create Missing Directory",
     "description": "Creates portraits/ directory so mods can COPY portrait files without crashing",
     "target_mod": null,
-    "trigger": { "type": "always" },
-    "marker": { "file": null, "text": null, "check_game_dir": "portraits" },
+    "trigger": {
+      "type": "always"
+    },
+    "marker": {
+      "file": null,
+      "text": null,
+      "check_game_dir": "portraits"
+    },
     "ops": [
-      { "type": "mkdir", "path": "portraits" }
-    ]
+      {
+        "type": "mkdir",
+        "path": "portraits"
+      }
+    ],
+    "recommended": true,
+    "category": "required"
   },
   {
     "id": 25,
-    "name": "Talents of Faerun — Weapon Proficiency Kit Fix",
+    "name": "Talents of Faerun \u00e2\u20ac\u201d Weapon Proficiency Kit Fix",
     "description": "Adds vanilla specialty priest kits (ohtempus, ohtyr, etc.) to kitweapons.ini",
     "target_mod": "dw_talents",
-    "trigger": { "type": "file_exists", "path": "dw_talents/prof/data/kitweapons.ini" },
-    "marker": { "file": "dw_talents/prof/data/kitweapons.ini", "text": "OHTEMPUS" },
+    "trigger": {
+      "type": "file_exists",
+      "path": "dw_talents/prof/data/kitweapons.ini"
+    },
+    "marker": {
+      "file": "dw_talents/prof/data/kitweapons.ini",
+      "text": "OHTEMPUS"
+    },
     "ops": [
-      { "type": "copy", "src": "dw_talents_prof/kitweapons.ini", "dest": "dw_talents/prof/data/kitweapons.ini" }
-    ]
+      {
+        "type": "copy",
+        "src": "dw_talents_prof/kitweapons.ini",
+        "dest": "dw_talents/prof/data/kitweapons.ini"
+      }
+    ],
+    "recommended": true,
+    "category": "bugfix"
   },
   {
     "id": 26,
-    "name": "TB#Tweaks — BCS Decompile Guard",
+    "name": "TB#Tweaks \u00e2\u20ac\u201d BCS Decompile Guard",
     "description": "Adds A7/BD/C#AJAN exclusion to impdiff.tpa difficulty system",
     "target_mod": "tb#tweaks",
-    "trigger": { "type": "file_exists", "path": "tb#tweaks/lib/impdiff.tpa" },
-    "marker": { "file": "tb#tweaks/lib/impdiff.tpa", "text": "A7[#!\\-]" },
+    "trigger": {
+      "type": "file_exists",
+      "path": "tb#tweaks/lib/impdiff.tpa"
+    },
+    "marker": {
+      "file": "tb#tweaks/lib/impdiff.tpa",
+      "text": "A7[#!\\-]"
+    },
     "ops": [
-      { "type": "copy", "src": "tb_tweaks/impdiff.tpa", "dest": "tb#tweaks/lib/impdiff.tpa" }
-    ]
+      {
+        "type": "copy",
+        "src": "tb_tweaks/impdiff.tpa",
+        "dest": "tb#tweaks/lib/impdiff.tpa"
+      }
+    ],
+    "recommended": true,
+    "category": "bugfix"
   },
   {
     "id": 27,
-    "name": "Bart_Tweaks — SPL File Size Guard",
+    "name": "Bart_Tweaks \u00e2\u20ac\u201d SPL File Size Guard",
     "description": "Changes SOURCE_SIZE guard from 0x72 to 0x82 in display_range.tpa",
     "target_mod": "Bart_Tweaks",
-    "trigger": { "type": "file_exists", "path": "Bart_Tweaks/lib/display_range.tpa" },
-    "marker": { "file": "Bart_Tweaks/lib/display_range.tpa", "text": "0x82" },
+    "trigger": {
+      "type": "file_exists",
+      "path": "Bart_Tweaks/lib/display_range.tpa"
+    },
+    "marker": {
+      "file": "Bart_Tweaks/lib/display_range.tpa",
+      "text": "0x82"
+    },
     "ops": [
-      { "type": "copy", "src": "bart_tweaks/display_range.tpa", "dest": "Bart_Tweaks/lib/display_range.tpa" }
-    ]
+      {
+        "type": "copy",
+        "src": "bart_tweaks/display_range.tpa",
+        "dest": "Bart_Tweaks/lib/display_range.tpa"
+      }
+    ],
+    "recommended": true,
+    "category": "bugfix"
   },
   {
     "id": 28,
-    "name": "Cliffette's History — Portraits Directory Fix",
+    "name": "Cliffette's History \u00e2\u20ac\u201d Portraits Directory Fix",
     "description": "Uses MKDIR + explicit filenames instead of bare directory COPY",
     "target_mod": "cliffhistory",
-    "trigger": { "type": "file_exists", "path": "cliffhistory/setup-cliffhistory.tp2" },
-    "marker": { "file": "cliffhistory/setup-cliffhistory.tp2", "text": "MKDIR" },
+    "trigger": {
+      "type": "file_exists",
+      "path": "cliffhistory/setup-cliffhistory.tp2"
+    },
+    "marker": {
+      "file": "cliffhistory/setup-cliffhistory.tp2",
+      "text": "MKDIR"
+    },
     "ops": [
-      { "type": "copy", "src": "cliffhistory/setup-cliffhistory.tp2", "dest": "cliffhistory/setup-cliffhistory.tp2" }
-    ]
+      {
+        "type": "copy",
+        "src": "cliffhistory/setup-cliffhistory.tp2",
+        "dest": "cliffhistory/setup-cliffhistory.tp2"
+      }
+    ],
+    "recommended": true,
+    "category": "bugfix"
   },
   {
     "id": 29,
-    "name": "MiH Meta-Mod — Preserve EET.flag + IDS + BCS During Cleanup",
-    "description": "CRITICAL: Prevents cleanup from biffing/deleting EET.flag, .IDS, and .BCS files. Biffed BCS/IDS files become corrupt and break EET_end and post-EET mods.",
+    "name": "MiH Meta-Mod \u00e2\u20ac\u201d Preserve EET.flag + IDS + BCS + large binaries during MAKE_BIFF",
+    "description": "Replaces mih_metamod's cleanup_override.tpa with _eetmr_cleanup_v6: preserves IDS/BCS/CAMPAIGN.2DA/PDIALOG.2DA/EET.flag AND large binary types (.tis/.mos/.pvrz/.bam/.bmp/.wav/.are/.wed) to weidu_external/_eetmr_preserve (outside override/) before MAKE_BIFF. Fixes: (a) EET_end's 'Cannot Set 2DA Entry' fatal on biffed CAMPAIGN.2DA (v4); (b) PDIALOG.2DA regex breakage (v5); (c) BIFF 4GB wraparound on megainstalls where override/ exceeds 4 GB (v6 \u00e2\u20ac\u201d Test #33 showed 6.2 GB mh#clean.bif corrupting ~49,000 post-wrap resources including BG0100.ARE).",
     "target_mod": "mih_metamod",
-    "trigger": { "type": "file_exists", "path": "mih_metamod/cleanup/cleanup_override.tpa" },
-    "marker": { "file": "mih_metamod/cleanup/cleanup_override.tpa", "text": "_eetmr_preserve" },
+    "trigger": {
+      "type": "file_exists",
+      "path": "mih_metamod/cleanup/cleanup_override.tpa"
+    },
+    "marker": {
+      "file": "mih_metamod/cleanup/cleanup_override.tpa",
+      "md5": "9eed7b1096b7462100bf6d3497a712e7"
+    },
     "ops": [
-      { "type": "copy", "src": "mih_metamod_cleanup/cleanup_override.tpa", "dest": "mih_metamod/cleanup/cleanup_override.tpa" }
-    ]
+      {
+        "type": "copy",
+        "src": "mih_metamod_cleanup/cleanup_override.tpa",
+        "dest": "mih_metamod/cleanup/cleanup_override.tpa"
+      }
+    ],
+    "recommended": true,
+    "category": "required"
   },
   {
     "id": 30,
-    "name": "5E Spellcasting — BCS Script Guard",
-    "description": "Skips corrupted NPC scripts (C#AJAN, BD*, A7*) in EXTEND_TOP loop",
+    "name": "5E Spellcasting \u00e2\u20ac\u201d BCS Script Guard",
+    "description": "[opt-in: defensive PATCH_TRY wrap, may be redundant under file_guard] Skips corrupted NPC scripts (C#AJAN, BD*, A7*) in EXTEND_TOP loop",
     "target_mod": "5E_spellcasting",
-    "trigger": { "type": "file_exists", "path": "5E_spellcasting/lib/semi_spontaneous.tpa" },
-    "marker": { "file": "5E_spellcasting/lib/semi_spontaneous.tpa", "text": "C#AJAN" },
+    "trigger": {
+      "type": "file_exists",
+      "path": "5E_spellcasting/lib/semi_spontaneous.tpa"
+    },
+    "marker": {
+      "file": "5E_spellcasting/lib/semi_spontaneous.tpa",
+      "text": "C#AJAN"
+    },
     "ops": [
-      { "type": "copy", "src": "5E_spellcasting/semi_spontaneous.tpa", "dest": "5E_spellcasting/lib/semi_spontaneous.tpa" }
-    ]
+      {
+        "type": "copy",
+        "src": "5E_spellcasting/semi_spontaneous.tpa",
+        "dest": "5E_spellcasting/lib/semi_spontaneous.tpa"
+      }
+    ],
+    "recommended": false,
+    "category": "bugfix"
   },
   {
     "id": 31,
-    "name": "Animal Companions — DestroySelf Parse Error Fix",
-    "description": "Fixes DestroySelf(5) call in UBRPET.d — DestroySelf takes no arguments",
+    "name": "Animal Companions \u00e2\u20ac\u201d DestroySelf Parse Error Fix",
+    "description": "Fixes DestroySelf(5) call in UBRPET.d \u00e2\u20ac\u201d DestroySelf takes no arguments",
     "target_mod": "AnimalCompanions",
-    "trigger": { "type": "file_exists", "path": "AnimalCompanions/files3/UBRPET.d" },
-    "marker": { "file": "AnimalCompanions/files3/UBRPET.d", "text": "DestroySelf(5)", "invert": true },
+    "trigger": {
+      "type": "file_exists",
+      "path": "AnimalCompanions/files3/UBRPET.d"
+    },
+    "marker": {
+      "file": "AnimalCompanions/files3/UBRPET.d",
+      "text": "DestroySelf(5)",
+      "invert": true
+    },
     "ops": [
-      { "type": "replace", "file": "AnimalCompanions/files3/UBRPET.d", "find": "DestroySelf(5)", "replace": "DestroySelf()" }
-    ]
+      {
+        "type": "replace",
+        "file": "AnimalCompanions/files3/UBRPET.d",
+        "find": "DestroySelf(5)",
+        "replace": "DestroySelf()"
+      }
+    ],
+    "recommended": true,
+    "category": "bugfix"
   },
   {
     "id": 32,
-    "name": "Animal Companions — Remove ACTION_READLN Prompts",
+    "name": "Animal Companions \u00e2\u20ac\u201d Remove ACTION_READLN Prompts",
     "description": "Replaces interactive druid/name prompts with defaults for automated install (druid=1, name=Companion)",
     "target_mod": "AnimalCompanions",
-    "trigger": { "type": "file_exists", "path": "AnimalCompanions/Setup-AnimalCompanions.tp2" },
-    "marker": { "file": "AnimalCompanions/Setup-AnimalCompanions.tp2", "text": "EET Mod Forge Patch: Replaced ACTION_READLN" },
+    "trigger": {
+      "type": "file_exists",
+      "path": "AnimalCompanions/Setup-AnimalCompanions.tp2"
+    },
+    "marker": {
+      "file": "AnimalCompanions/Setup-AnimalCompanions.tp2",
+      "text": "Infinity Mod Forge Patch: Replaced ACTION_READLN"
+    },
     "ops": [
-      { "type": "copy", "src": "animalcompanions/Setup-AnimalCompanions.tp2", "dest": "AnimalCompanions/Setup-AnimalCompanions.tp2" }
-    ]
+      {
+        "type": "copy",
+        "src": "animalcompanions/Setup-AnimalCompanions.tp2",
+        "dest": "AnimalCompanions/Setup-AnimalCompanions.tp2"
+      }
+    ],
+    "recommended": true,
+    "category": "compat"
   },
   {
     "id": 33,
-    "name": "Thalantyr Item Upgrade — TRA Reload Fix",
+    "name": "Thalantyr Item Upgrade \u00e2\u20ac\u201d TRA Reload Fix",
     "description": "Adds LOAD_TRA for thalan.tra after charset conversion to prevent missing string errors",
     "target_mod": "thalan",
-    "trigger": { "type": "file_exists", "path": "thalan/thalan.tp2" },
-    "marker": { "file": "thalan/thalan.tp2", "text": "LOAD_TRA" },
+    "trigger": {
+      "type": "file_exists",
+      "path": "thalan/thalan.tp2"
+    },
+    "marker": {
+      "file": "thalan/thalan.tp2",
+      "text": "LOAD_TRA"
+    },
     "ops": [
-      { "type": "replace", "file": "thalan/thalan.tp2", "find": "    INCLUDE ~%MOD_FOLDER%/lib/BG1TotSCPolishCustomEncoding.tpa~\n  END\nEND", "replace": "    INCLUDE ~%MOD_FOLDER%/lib/BG1TotSCPolishCustomEncoding.tpa~\n  END\n  LOAD_TRA \"%out_path%/%LANGUAGE%/thalan.tra\"\nEND" }
-    ]
+      {
+        "type": "replace",
+        "file": "thalan/thalan.tp2",
+        "find": "    INCLUDE ~%MOD_FOLDER%/lib/BG1TotSCPolishCustomEncoding.tpa~\n  END\nEND",
+        "replace": "    INCLUDE ~%MOD_FOLDER%/lib/BG1TotSCPolishCustomEncoding.tpa~\n  END\n  LOAD_TRA \"%out_path%/%LANGUAGE%/thalan.tra\"\nEND"
+      }
+    ],
+    "recommended": true,
+    "category": "bugfix"
   },
   {
     "id": 34,
-    "name": "ACTION.IDS — Pre-populate RemoveSpellRES(S:Spell*)",
+    "name": "ACTION.IDS \u00e2\u20ac\u201d Pre-populate RemoveSpellRES(S:Spell*)",
     "description": "IDS pre-population (EET_end + A7-MagicStore). Prevents 56+ mods from appending duplicate entries. Only applies after early mods create override/ACTION.IDS.",
     "target_mod": null,
-    "trigger": { "type": "file_exists_game", "path": "override/ACTION.IDS" },
-    "marker": { "file": null, "text": null, "check_game_file_contains": { "file": "override/ACTION.IDS", "text": "RemoveSpellRES(S:Spell*)" } },
+    "trigger": {
+      "type": "file_exists_game",
+      "path": "override/ACTION.IDS"
+    },
+    "marker": {
+      "file": null,
+      "text": null,
+      "check_game_file_contains": {
+        "file": "override/ACTION.IDS",
+        "text": "RemoveSpellRES(S:Spell*)"
+      }
+    },
     "ops": [
-      { "type": "append_to_game", "file": "override/ACTION.IDS", "line": "147 RemoveSpellRES(S:Spell*)", "unless": "RemoveSpellRES(S:Spell*)" }
-    ]
+      {
+        "type": "append_to_game",
+        "file": "override/ACTION.IDS",
+        "line": "147 RemoveSpellRES(S:Spell*)",
+        "unless": "RemoveSpellRES(S:Spell*)"
+      }
+    ],
+    "recommended": true,
+    "category": "required"
   },
   {
     "id": 35,
-    "name": "TRIGGER.IDS — Pre-populate HaveSpellRES(S:Spell*)",
+    "name": "TRIGGER.IDS \u00e2\u20ac\u201d Pre-populate HaveSpellRES(S:Spell*)",
     "description": "IDS pre-population (EET_end + A7-MagicStore). Prevents 30+ mods from appending duplicate entries. Only applies after early mods create override/TRIGGER.IDS.",
     "target_mod": null,
-    "trigger": { "type": "file_exists_game", "path": "override/TRIGGER.IDS" },
-    "marker": { "file": null, "text": null, "check_game_file_contains": { "file": "override/TRIGGER.IDS", "text": "HaveSpellRES(S:Spell*)" } },
+    "trigger": {
+      "type": "file_exists_game",
+      "path": "override/TRIGGER.IDS"
+    },
+    "marker": {
+      "file": null,
+      "text": null,
+      "check_game_file_contains": {
+        "file": "override/TRIGGER.IDS",
+        "text": "HaveSpellRES(S:Spell*)"
+      }
+    },
     "ops": [
-      { "type": "append_to_game", "file": "override/TRIGGER.IDS", "line": "0x4031 HaveSpellRES(S:Spell*)", "unless": "HaveSpellRES(S:Spell*)" }
-    ]
+      {
+        "type": "append_to_game",
+        "file": "override/TRIGGER.IDS",
+        "line": "0x4031 HaveSpellRES(S:Spell*)",
+        "unless": "HaveSpellRES(S:Spell*)"
+      }
+    ],
+    "recommended": true,
+    "category": "required"
   },
   {
     "id": 36,
-    "name": "dw_talents reroute_stats — BCS round-trip safety",
-    "description": "Replaces reroute_stats.tph with version that wraps all three DECOMPILE_AND_PATCH calls in PATCH_TRY.",
+    "name": "dw_talents reroute_stats \u00e2\u20ac\u201d BCS round-trip safety",
+    "description": "[opt-in: defensive PATCH_TRY wrap, may be redundant under file_guard] Replaces dw_talents/lib/reroute_stats.tph with a version wrapping all three DECOMPILE_AND_PATCH calls in PATCH_TRY/WITH DEFAULT/END. The original crashes with Parsing.Parse_error on re-compile for any BCS that round-trips to different text. md5 marker so this patch supersedes earlier attempts.",
     "target_mod": "dw_talents",
-    "trigger": { "type": "file_exists", "path": "dw_talents/lib/reroute_stats.tph" },
-    "marker": { "file": "dw_talents/lib/reroute_stats.tph", "text": "_eetmr_bcs_safety" },
+    "trigger": {
+      "type": "file_exists",
+      "path": "dw_talents/lib/reroute_stats.tph"
+    },
+    "marker": {
+      "file": "dw_talents/lib/reroute_stats.tph",
+      "md5": "96fc343ec7625086775dca5796830f44"
+    },
     "ops": [
-      { "type": "copy", "src": "dw_talents/reroute_stats.tph", "dest": "dw_talents/lib/reroute_stats.tph" }
-    ]
+      {
+        "type": "copy",
+        "src": "dw_talents/reroute_stats.tph",
+        "dest": "dw_talents/lib/reroute_stats.tph"
+      }
+    ],
+    "recommended": false,
+    "category": "bugfix"
   },
   {
     "id": 37,
-    "name": "dw_talents lib_spl — BCS round-trip safety",
-    "description": "Wraps the _DW_OLD remap DECOMPILE_AND_PATCH in PATCH_TRY to prevent BCS corruption.",
+    "name": "dw_talents lib_spl \u00e2\u20ac\u201d BCS round-trip safety",
+    "description": "[opt-in: defensive PATCH_TRY wrap, may be redundant under file_guard] Wraps the _DW_OLD remap DECOMPILE_AND_PATCH in PATCH_TRY to prevent BCS corruption.",
     "target_mod": "dw_talents",
-    "trigger": { "type": "file_exists", "path": "dw_talents/sfo/lib_spl.tph" },
-    "marker": { "file": "dw_talents/sfo/lib_spl.tph", "text": "_eetmr_bcs_safety" },
+    "trigger": {
+      "type": "file_exists",
+      "path": "dw_talents/sfo/lib_spl.tph"
+    },
+    "marker": {
+      "file": "dw_talents/sfo/lib_spl.tph",
+      "text": "_eetmr_bcs_safety"
+    },
     "ops": [
-      { "type": "replace", "file": "dw_talents/sfo/lib_spl.tph",
-        "find": "COPY_EXISTING_REGEXP \".*\\.bcs\" override\n\tPATCH_IF NOT (\n\t\t~%SOURCE_RES%~ STRING_COMPARE_REGEXP ~BD.*~ = 0 OR ~%SOURCE_RES%~ STRING_EQUAL_CASE ~C#AJAN~\n\t\tOR ~%SOURCE_RES%~ STRING_EQUAL_CASE ~A7!GXRU~\n\t) BEGIN\n\t\tDECOMPILE_AND_PATCH BEGIN\n\t\t\tREPLACE_TEXTUALLY \"_DW_OLD\" \"\"\n\t\tEND\n\tEND\nBUT_ONLY",
-        "replace": "// _eetmr_bcs_safety: wrapped DECOMPILE_AND_PATCH in PATCH_TRY for round-trip safety\nCOPY_EXISTING_REGEXP \".*\\.bcs\" override\n\tPATCH_IF NOT (\n\t\t~%SOURCE_RES%~ STRING_COMPARE_REGEXP ~BD.*~ = 0 OR ~%SOURCE_RES%~ STRING_EQUAL_CASE ~C#AJAN~\n\t\tOR ~%SOURCE_RES%~ STRING_EQUAL_CASE ~A7!GXRU~\n\t) BEGIN\n\t\tPATCH_IF INDEX_BUFFER (\"_DW_OLD\") >= 0 BEGIN\n\t\t\tPATCH_TRY\n\t\t\t\tDECOMPILE_AND_PATCH BEGIN\n\t\t\t\t\tREPLACE_TEXTUALLY \"_DW_OLD\" \"\"\n\t\t\t\tEND\n\t\t\tWITH DEFAULT END\n\t\tEND\n\tEND\nBUT_ONLY" }
-    ]
+      {
+        "type": "replace",
+        "file": "dw_talents/sfo/lib_spl.tph",
+        "find": "COPY_EXISTING_REGEXP GLOB \".*\\.bcs\" override\n\tPATCH_IF NOT (\n\t\t~%SOURCE_RES%~ STRING_COMPARE_REGEXP ~BD.*~ = 0 OR ~%SOURCE_RES%~ STRING_EQUAL_CASE ~C#AJAN~\n\t\tOR ~%SOURCE_RES%~ STRING_EQUAL_CASE ~A7!GXRU~\n\t) BEGIN\n\t\tDECOMPILE_AND_PATCH BEGIN\n\t\t\tREPLACE_TEXTUALLY \"_DW_OLD\" \"\"\n\t\tEND\n\tEND\nBUT_ONLY",
+        "replace": "// _eetmr_bcs_safety: wrapped DECOMPILE_AND_PATCH in PATCH_TRY for round-trip safety\nCOPY_EXISTING_REGEXP GLOB \".*\\.bcs\" override\n\tPATCH_IF NOT (\n\t\t~%SOURCE_RES%~ STRING_COMPARE_REGEXP ~BD.*~ = 0 OR ~%SOURCE_RES%~ STRING_EQUAL_CASE ~C#AJAN~\n\t\tOR ~%SOURCE_RES%~ STRING_EQUAL_CASE ~A7!GXRU~\n\t) BEGIN\n\t\tPATCH_IF INDEX_BUFFER (\"_DW_OLD\") >= 0 BEGIN\n\t\t\tPATCH_TRY\n\t\t\t\tDECOMPILE_AND_PATCH BEGIN\n\t\t\t\t\tREPLACE_TEXTUALLY \"_DW_OLD\" \"\"\n\t\t\t\tEND\n\t\t\tWITH DEFAULT END\n\t\tEND\n\tEND\nBUT_ONLY"
+      }
+    ],
+    "recommended": false,
+    "category": "bugfix"
   },
   {
     "id": 38,
-    "name": "SCS lib_spl — BCS round-trip safety",
-    "description": "Same fix as patch #37 but for SCS's copy of lib_spl.tph.",
+    "name": "SCS lib_spl \u00e2\u20ac\u201d BCS round-trip safety",
+    "description": "[opt-in: defensive PATCH_TRY wrap, may be redundant under file_guard] Same fix as patch #37 but for SCS's copy of lib_spl.tph.",
     "target_mod": "stratagems",
-    "trigger": { "type": "file_exists", "path": "stratagems/sfo2e/lib_spl.tph" },
-    "marker": { "file": "stratagems/sfo2e/lib_spl.tph", "text": "_eetmr_bcs_safety" },
+    "trigger": {
+      "type": "file_exists",
+      "path": "stratagems/sfo2e/lib_spl.tph"
+    },
+    "marker": {
+      "file": "stratagems/sfo2e/lib_spl.tph",
+      "text": "_eetmr_bcs_safety"
+    },
     "ops": [
-      { "type": "replace", "file": "stratagems/sfo2e/lib_spl.tph",
-        "find": "COPY_EXISTING_REGEXP \".*\\.bcs\" override\n\tPATCH_IF NOT (\n\t\t~%SOURCE_RES%~ STRING_COMPARE_REGEXP ~BD.*~ = 0 OR ~%SOURCE_RES%~ STRING_EQUAL_CASE ~C#AJAN~\n\t\tOR ~%SOURCE_RES%~ STRING_EQUAL_CASE ~A7!GXRU~\n\t) BEGIN\n\t\tDECOMPILE_AND_PATCH BEGIN\n\t\t\tREPLACE_TEXTUALLY \"_DW_OLD\" \"\"\n\t\tEND\n\tEND\nBUT_ONLY",
-        "replace": "// _eetmr_bcs_safety: wrapped DECOMPILE_AND_PATCH in PATCH_TRY for round-trip safety\nCOPY_EXISTING_REGEXP \".*\\.bcs\" override\n\tPATCH_IF NOT (\n\t\t~%SOURCE_RES%~ STRING_COMPARE_REGEXP ~BD.*~ = 0 OR ~%SOURCE_RES%~ STRING_EQUAL_CASE ~C#AJAN~\n\t\tOR ~%SOURCE_RES%~ STRING_EQUAL_CASE ~A7!GXRU~\n\t) BEGIN\n\t\tPATCH_IF INDEX_BUFFER (\"_DW_OLD\") >= 0 BEGIN\n\t\t\tPATCH_TRY\n\t\t\t\tDECOMPILE_AND_PATCH BEGIN\n\t\t\t\t\tREPLACE_TEXTUALLY \"_DW_OLD\" \"\"\n\t\t\t\tEND\n\t\t\tWITH DEFAULT END\n\t\tEND\n\tEND\nBUT_ONLY" }
-    ]
+      {
+        "type": "replace",
+        "file": "stratagems/sfo2e/lib_spl.tph",
+        "find": "COPY_EXISTING_REGEXP GLOB \".*\\.bcs\" override\n\tPATCH_IF NOT (\n\t\t~%SOURCE_RES%~ STRING_COMPARE_REGEXP ~BD.*~ = 0 OR ~%SOURCE_RES%~ STRING_EQUAL_CASE ~C#AJAN~\n\t\tOR ~%SOURCE_RES%~ STRING_EQUAL_CASE ~A7!GXRU~\n\t) BEGIN\n\t\tDECOMPILE_AND_PATCH BEGIN\n\t\t\tREPLACE_TEXTUALLY \"_DW_OLD\" \"\"\n\t\tEND\n\tEND\nBUT_ONLY",
+        "replace": "// _eetmr_bcs_safety: wrapped DECOMPILE_AND_PATCH in PATCH_TRY for round-trip safety\nCOPY_EXISTING_REGEXP GLOB \".*\\.bcs\" override\n\tPATCH_IF NOT (\n\t\t~%SOURCE_RES%~ STRING_COMPARE_REGEXP ~BD.*~ = 0 OR ~%SOURCE_RES%~ STRING_EQUAL_CASE ~C#AJAN~\n\t\tOR ~%SOURCE_RES%~ STRING_EQUAL_CASE ~A7!GXRU~\n\t) BEGIN\n\t\tPATCH_IF INDEX_BUFFER (\"_DW_OLD\") >= 0 BEGIN\n\t\t\tPATCH_TRY\n\t\t\t\tDECOMPILE_AND_PATCH BEGIN\n\t\t\t\t\tREPLACE_TEXTUALLY \"_DW_OLD\" \"\"\n\t\t\t\tEND\n\t\t\tWITH DEFAULT END\n\t\tEND\n\tEND\nBUT_ONLY"
+      }
+    ],
+    "recommended": false,
+    "category": "bugfix"
   },
   {
     "id": 39,
-    "name": "SCS lib_bcs — BCS round-trip safety",
-    "description": "Wraps the core BCS editor DECOMPILE_AND_PATCH in PATCH_TRY. Prevents corruption of scripts that can't round-trip.",
+    "name": "SCS lib_bcs \u00e2\u20ac\u201d BCS round-trip safety",
+    "description": "[opt-in: defensive PATCH_TRY wrap, may be redundant under file_guard] Wraps the core BCS editor DECOMPILE_AND_PATCH in PATCH_TRY. Prevents corruption of scripts that can't round-trip.",
     "target_mod": "stratagems",
-    "trigger": { "type": "file_exists", "path": "stratagems/sfo/filetype/lib_bcs.tpa" },
-    "marker": { "file": "stratagems/sfo/filetype/lib_bcs.tpa", "text": "_eetmr_bcs_safety" },
+    "trigger": {
+      "type": "file_exists",
+      "path": "stratagems/sfo/filetype/lib_bcs.tpa"
+    },
+    "marker": {
+      "file": "stratagems/sfo/filetype/lib_bcs.tpa",
+      "text": "_eetmr_bcs_safety"
+    },
     "ops": [
-      { "type": "replace", "file": "stratagems/sfo/filetype/lib_bcs.tpa",
+      {
+        "type": "replace",
+        "file": "stratagems/sfo/filetype/lib_bcs.tpa",
         "find": "       COPY_EXISTING_REGEXP GLOB \".*\\.bcs\" override\n             SPRINT filename \"%SOURCE_RES%\"\n             DECOMPILE_AND_PATCH BEGIN\n                LPF process_baf STR_VAR editstring filename END\n             END\n       BUT_ONLY",
-        "replace": "       // _eetmr_bcs_safety: wrapped DECOMPILE_AND_PATCH in PATCH_TRY for round-trip safety\n       COPY_EXISTING_REGEXP GLOB \".*\\.bcs\" override\n             SPRINT filename \"%SOURCE_RES%\"\n             PATCH_TRY\n                DECOMPILE_AND_PATCH BEGIN\n                   LPF process_baf STR_VAR editstring filename END\n                END\n             WITH DEFAULT\n                PATCH_PRINT ~WARNING: [%SOURCE_FILE%] BCS round-trip failed, skipping~\n             END\n       BUT_ONLY" }
-    ]
+        "replace": "       // _eetmr_bcs_safety: wrapped DECOMPILE_AND_PATCH in PATCH_TRY for round-trip safety\n       COPY_EXISTING_REGEXP GLOB \".*\\.bcs\" override\n             SPRINT filename \"%SOURCE_RES%\"\n             PATCH_TRY\n                DECOMPILE_AND_PATCH BEGIN\n                   LPF process_baf STR_VAR editstring filename END\n                END\n             WITH DEFAULT\n                PATCH_PRINT ~WARNING: [%SOURCE_FILE%] BCS round-trip failed, skipping~\n             END\n       BUT_ONLY"
+      }
+    ],
+    "recommended": false,
+    "category": "bugfix"
   },
   {
     "id": 40,
-    "name": "SCS research_iwd_scripts — BCS round-trip safety",
-    "description": "Wraps the IWD spell script explorer DECOMPILE_AND_PATCH in PATCH_TRY.",
+    "name": "SCS research_iwd_scripts \u00e2\u20ac\u201d BCS round-trip safety",
+    "description": "[opt-in: defensive PATCH_TRY wrap, may be redundant under file_guard] Wraps the IWD spell script explorer DECOMPILE_AND_PATCH in PATCH_TRY.",
     "target_mod": "stratagems",
-    "trigger": { "type": "file_exists", "path": "stratagems/lib/research_iwd_scripts.tph" },
-    "marker": { "file": "stratagems/lib/research_iwd_scripts.tph", "text": "_eetmr_bcs_safety" },
+    "trigger": {
+      "type": "file_exists",
+      "path": "stratagems/lib/research_iwd_scripts.tph"
+    },
+    "marker": {
+      "file": "stratagems/lib/research_iwd_scripts.tph",
+      "text": "_eetmr_bcs_safety"
+    },
     "ops": [
-      { "type": "replace", "file": "stratagems/lib/research_iwd_scripts.tph",
+      {
+        "type": "replace",
+        "file": "stratagems/lib/research_iwd_scripts.tph",
         "find": "   COPY_EXISTING_REGEXP GLOB \".*\\.bcs\" override\n         DECOMPILE_AND_PATCH BEGIN\n            PATCH_IF (INDEX_BUFFER(\"HaveSpell(\")>=0) BEGIN\n               LPF log_this STR_VAR file=spell_scripts.txt input=\"%SOURCE_RES%\" END\n               counter +=1\n            END\n         END\n   BUT_ONLY",
-        "replace": "   // _eetmr_bcs_safety: wrapped DECOMPILE_AND_PATCH in PATCH_TRY for round-trip safety\n   COPY_EXISTING_REGEXP GLOB \".*\\.bcs\" override\n         PATCH_TRY\n            DECOMPILE_AND_PATCH BEGIN\n               PATCH_IF (INDEX_BUFFER(\"HaveSpell(\")>=0) BEGIN\n                  LPF log_this STR_VAR file=spell_scripts.txt input=\"%SOURCE_RES%\" END\n                  counter +=1\n               END\n            END\n         WITH DEFAULT\n            PATCH_PRINT ~WARNING: [%SOURCE_FILE%] BCS round-trip failed, skipping~\n         END\n   BUT_ONLY" }
-    ]
+        "replace": "   // _eetmr_bcs_safety: wrapped DECOMPILE_AND_PATCH in PATCH_TRY for round-trip safety\n   COPY_EXISTING_REGEXP GLOB \".*\\.bcs\" override\n         PATCH_TRY\n            DECOMPILE_AND_PATCH BEGIN\n               PATCH_IF (INDEX_BUFFER(\"HaveSpell(\")>=0) BEGIN\n                  LPF log_this STR_VAR file=spell_scripts.txt input=\"%SOURCE_RES%\" END\n                  counter +=1\n               END\n            END\n         WITH DEFAULT\n            PATCH_PRINT ~WARNING: [%SOURCE_FILE%] BCS round-trip failed, skipping~\n         END\n   BUT_ONLY"
+      }
+    ],
+    "recommended": false,
+    "category": "bugfix"
   },
   {
     "id": 41,
-    "name": "EET_end — ARE size guard",
+    "name": "EET_end \u00e2\u20ac\u201d ARE size guard",
     "description": "Adds a SOURCE_SIZE check before READ_SHORT 0x48 in EET_end's ARE scanning loop. Prevents crash on undersized ARE files (e.g. A7#127.ARE = 52 bytes from Golem Construction).",
     "target_mod": "EET_end",
-    "trigger": { "type": "file_exists", "path": "EET_end/EET_end.tp2" },
-    "marker": { "file": "EET_end/EET_end.tp2", "text": "_eetmr_are_guard" },
+    "trigger": {
+      "type": "file_exists",
+      "path": "EET_end/EET_end.tp2"
+    },
+    "marker": {
+      "file": "EET_end/EET_end.tp2",
+      "text": "_eetmr_are_guard"
+    },
     "ops": [
-      { "type": "replace", "file": "EET_end/EET_end.tp2",
+      {
+        "type": "replace",
+        "file": "EET_end/EET_end.tp2",
         "find": "COPY_EXISTING_REGEXP GLOB ~.*\\.ARE~ ~override~\n\tREAD_SHORT 0x48 flags",
-        "replace": "// _eetmr_are_guard: skip undersized ARE files that would crash READ_SHORT 0x48\nCOPY_EXISTING_REGEXP GLOB ~.*\\.ARE~ ~override~\n\tSET flags = 0\n\tPATCH_IF SOURCE_SIZE >= 0x4a BEGIN READ_SHORT 0x48 flags END" }
-    ]
+        "replace": "// _eetmr_are_guard: skip undersized ARE files that would crash READ_SHORT 0x48\nCOPY_EXISTING_REGEXP GLOB ~.*\\.ARE~ ~override~\n\tSET flags = 0\n\tPATCH_IF SOURCE_SIZE >= 0x4a BEGIN READ_SHORT 0x48 flags END"
+      }
+    ],
+    "recommended": true,
+    "category": "bugfix"
   },
   {
     "id": 42,
-    "name": "EET_end — BCS round-trip safety",
-    "description": "Wraps EET_end's DECOMPILE_AND_PATCH on all BCS files in PATCH_TRY. Prevents crash on scripts that can't round-trip (e.g. A7!GXRU.BCS from Golem Construction).",
+    "name": "EET_end \u00e2\u20ac\u201d BCS round-trip safety",
+    "description": "[opt-in: defensive PATCH_TRY wrap, may be redundant under file_guard] Wraps EET_end's DECOMPILE_AND_PATCH on all BCS files in PATCH_TRY. Prevents crash on scripts that can't round-trip (e.g. A7!GXRU.BCS from Golem Construction).",
     "target_mod": "EET_end",
-    "trigger": { "type": "file_exists", "path": "EET_end/EET_end.tp2" },
-    "marker": { "file": "EET_end/EET_end.tp2", "text": "_eetmr_bcs_guard" },
+    "trigger": {
+      "type": "file_exists",
+      "path": "EET_end/EET_end.tp2"
+    },
+    "marker": {
+      "file": "EET_end/EET_end.tp2",
+      "text": "_eetmr_bcs_guard"
+    },
     "ops": [
-      { "type": "replace", "file": "EET_end/EET_end.tp2",
+      {
+        "type": "replace",
+        "file": "EET_end/EET_end.tp2",
         "find": "COPY_EXISTING_REGEXP GLOB ~.+\\.BCS$~ ~override~\n\tDECOMPILE_AND_PATCH BEGIN\n\t\tREPLACE_EVALUATE CASE_INSENSITIVE ~\\([Tt]Dialog[A-Za-z]*(\"\\)\\([^\"]+\\)\"~ BEGIN SPRINT match ~%MATCH2%~ SPRINT res ~dlg~ LPM EET_PCU_outer_res END ~\\1%match%\"~\n\tEND\nBUT_ONLY",
-        "replace": "// _eetmr_bcs_guard: wrapped DECOMPILE_AND_PATCH in PATCH_TRY for round-trip safety\nCOPY_EXISTING_REGEXP GLOB ~.+\\.BCS$~ ~override~\n\tPATCH_TRY\n\t\tDECOMPILE_AND_PATCH BEGIN\n\t\t\tREPLACE_EVALUATE CASE_INSENSITIVE ~\\([Tt]Dialog[A-Za-z]*(\"\\)\\([^\"]+\\)\"~ BEGIN SPRINT match ~%MATCH2%~ SPRINT res ~dlg~ LPM EET_PCU_outer_res END ~\\1%match%\"~\n\t\tEND\n\tWITH DEFAULT\n\t\tPATCH_PRINT ~WARNING: [%SOURCE_FILE%] BCS round-trip failed, skipping~\n\tEND\nBUT_ONLY" }
-    ]
+        "replace": "// _eetmr_bcs_guard: wrapped DECOMPILE_AND_PATCH in PATCH_TRY for round-trip safety\nCOPY_EXISTING_REGEXP GLOB ~.+\\.BCS$~ ~override~\n\tPATCH_TRY\n\t\tDECOMPILE_AND_PATCH BEGIN\n\t\t\tREPLACE_EVALUATE CASE_INSENSITIVE ~\\([Tt]Dialog[A-Za-z]*(\"\\)\\([^\"]+\\)\"~ BEGIN SPRINT match ~%MATCH2%~ SPRINT res ~dlg~ LPM EET_PCU_outer_res END ~\\1%match%\"~\n\t\tEND\n\tWITH DEFAULT\n\t\tPATCH_PRINT ~WARNING: [%SOURCE_FILE%] BCS round-trip failed, skipping~\n\tEND\nBUT_ONLY"
+      }
+    ],
+    "recommended": false,
+    "category": "bugfix"
   },
   {
     "id": 43,
-    "name": "EET_end — DLG round-trip safety",
-    "description": "Wraps EET_end's DECOMPILE_AND_PATCH on all DLG files in PATCH_TRY. Prevents crash on dialogues that can't round-trip.",
+    "name": "EET_end \u00e2\u20ac\u201d DLG round-trip safety",
+    "description": "[opt-in: defensive PATCH_TRY wrap, may be redundant under file_guard] Wraps EET_end's DECOMPILE_AND_PATCH on all DLG files in PATCH_TRY. Prevents crash on dialogues that can't round-trip.",
     "target_mod": "EET_end",
-    "trigger": { "type": "file_exists", "path": "EET_end/EET_end.tp2" },
-    "marker": { "file": "EET_end/EET_end.tp2", "text": "_eetmr_dlg_guard" },
+    "trigger": {
+      "type": "file_exists",
+      "path": "EET_end/EET_end.tp2"
+    },
+    "marker": {
+      "file": "EET_end/EET_end.tp2",
+      "text": "_eetmr_dlg_guard"
+    },
     "ops": [
-      { "type": "replace", "file": "EET_end/EET_end.tp2",
+      {
+        "type": "replace",
+        "file": "EET_end/EET_end.tp2",
         "find": "COPY_EXISTING_REGEXP GLOB ~.+\\.DLG$~ ~override~\n\tDECOMPILE_AND_PATCH BEGIN\n\t\tPHP_EACH remapped_states AS file => state BEGIN\n\t\t\tREPLACE_EVALUATE CASE_INSENSITIVE ~\\( EXTERN .\\)%file%\\(. \\)\\([0-9]+\\)~ BEGIN\n\t\t\t\tSET match = state + MATCH3\n\t\t\t\tPATCH_PRINT ~Patching %SOURCE_FILESPEC%: %file% => %file_1% - dlg; %MATCH3% => %match% - state~\n\t\t\tEND ~%MATCH1%%file_1%%MATCH2%%match%~\n\t\tEND\n\t\tREPLACE_EVALUATE CASE_INSENSITIVE ~\\([Tt]Dialog[A-Za-z]*(\"\\)\\([^\"]+\\)\"~ BEGIN SPRINT match ~%MATCH2%~ SPRINT res ~dlg~ LPM EET_PCU_outer_res END ~\\1%match%\"~\n\tEND\nBUT_ONLY",
-        "replace": "// _eetmr_dlg_guard: wrapped DECOMPILE_AND_PATCH in PATCH_TRY for round-trip safety\nCOPY_EXISTING_REGEXP GLOB ~.+\\.DLG$~ ~override~\n\tPATCH_TRY\n\t\tDECOMPILE_AND_PATCH BEGIN\n\t\t\tPHP_EACH remapped_states AS file => state BEGIN\n\t\t\t\tREPLACE_EVALUATE CASE_INSENSITIVE ~\\( EXTERN .\\)%file%\\(. \\)\\([0-9]+\\)~ BEGIN\n\t\t\t\t\tSET match = state + MATCH3\n\t\t\t\t\tPATCH_PRINT ~Patching %SOURCE_FILESPEC%: %file% => %file_1% - dlg; %MATCH3% => %match% - state~\n\t\t\t\tEND ~%MATCH1%%file_1%%MATCH2%%match%~\n\t\t\tEND\n\t\t\tREPLACE_EVALUATE CASE_INSENSITIVE ~\\([Tt]Dialog[A-Za-z]*(\"\\)\\([^\"]+\\)\"~ BEGIN SPRINT match ~%MATCH2%~ SPRINT res ~dlg~ LPM EET_PCU_outer_res END ~\\1%match%\"~\n\t\tEND\n\tWITH DEFAULT\n\t\tPATCH_PRINT ~WARNING: [%SOURCE_FILE%] DLG round-trip failed, skipping~\n\tEND\nBUT_ONLY" }
-    ]
+        "replace": "// _eetmr_dlg_guard: wrapped DECOMPILE_AND_PATCH in PATCH_TRY for round-trip safety\nCOPY_EXISTING_REGEXP GLOB ~.+\\.DLG$~ ~override~\n\tPATCH_TRY\n\t\tDECOMPILE_AND_PATCH BEGIN\n\t\t\tPHP_EACH remapped_states AS file => state BEGIN\n\t\t\t\tREPLACE_EVALUATE CASE_INSENSITIVE ~\\( EXTERN .\\)%file%\\(. \\)\\([0-9]+\\)~ BEGIN\n\t\t\t\t\tSET match = state + MATCH3\n\t\t\t\t\tPATCH_PRINT ~Patching %SOURCE_FILESPEC%: %file% => %file_1% - dlg; %MATCH3% => %match% - state~\n\t\t\t\tEND ~%MATCH1%%file_1%%MATCH2%%match%~\n\t\t\tEND\n\t\t\tREPLACE_EVALUATE CASE_INSENSITIVE ~\\([Tt]Dialog[A-Za-z]*(\"\\)\\([^\"]+\\)\"~ BEGIN SPRINT match ~%MATCH2%~ SPRINT res ~dlg~ LPM EET_PCU_outer_res END ~\\1%match%\"~\n\t\tEND\n\tWITH DEFAULT\n\t\tPATCH_PRINT ~WARNING: [%SOURCE_FILE%] DLG round-trip failed, skipping~\n\tEND\nBUT_ONLY"
+      }
+    ],
+    "recommended": false,
+    "category": "bugfix"
   },
   {
     "id": 44,
-    "name": "MESpells — BCS round-trip safety",
-    "description": "Wraps MESpells Stoneskin DECOMPILE_AND_PATCH on all BCS files in PATCH_TRY.",
+    "name": "MESpells \u00e2\u20ac\u201d BCS round-trip safety",
+    "description": "[opt-in: defensive PATCH_TRY wrap, may be redundant under file_guard] Wraps MESpells Stoneskin DECOMPILE_AND_PATCH on all BCS files in PATCH_TRY.",
     "target_mod": "MESpells",
-    "trigger": { "type": "file_exists", "path": "MESpells/MESpells.tp2" },
-    "marker": { "file": "MESpells/MESpells.tp2", "text": "_eetmr_bcs_guard" },
+    "trigger": {
+      "type": "file_exists",
+      "path": "MESpells/MESpells.tp2"
+    },
+    "marker": {
+      "file": "MESpells/MESpells.tp2",
+      "text": "_eetmr_bcs_guard"
+    },
     "ops": [
-      { "type": "replace", "file": "MESpells/MESpells.tp2",
+      {
+        "type": "replace",
+        "file": "MESpells/MESpells.tp2",
         "find": "COPY_EXISTING_REGEXP ~.*\\.bcs~ ~override~\n\tDECOMPILE_AND_PATCH BEGIN\n\t\tREPLACE_TEXTUALLY CASE_INSENSITIVE ~\\(CheckStat[LG]?T?([^,]+, *[0-9]+\\), *STONESKINS)~ ~\\1,635)~\n\tEND\n\tBUT_ONLY_IF_IT_CHANGES",
-        "replace": "// _eetmr_bcs_guard: wrapped DECOMPILE_AND_PATCH in PATCH_TRY\nCOPY_EXISTING_REGEXP ~.*\\.bcs~ ~override~\n\tPATCH_TRY\n\t\tDECOMPILE_AND_PATCH BEGIN\n\t\t\tREPLACE_TEXTUALLY CASE_INSENSITIVE ~\\(CheckStat[LG]?T?([^,]+, *[0-9]+\\), *STONESKINS)~ ~\\1,635)~\n\t\tEND\n\tWITH DEFAULT\n\t\tPATCH_PRINT ~WARNING: [%SOURCE_FILE%] BCS round-trip failed, skipping~\n\tEND\n\tBUT_ONLY_IF_IT_CHANGES" }
-    ]
+        "replace": "// _eetmr_bcs_guard: wrapped DECOMPILE_AND_PATCH in PATCH_TRY\nCOPY_EXISTING_REGEXP ~.*\\.bcs~ ~override~\n\tPATCH_TRY\n\t\tDECOMPILE_AND_PATCH BEGIN\n\t\t\tREPLACE_TEXTUALLY CASE_INSENSITIVE ~\\(CheckStat[LG]?T?([^,]+, *[0-9]+\\), *STONESKINS)~ ~\\1,635)~\n\t\tEND\n\tWITH DEFAULT\n\t\tPATCH_PRINT ~WARNING: [%SOURCE_FILE%] BCS round-trip failed, skipping~\n\tEND\n\tBUT_ONLY_IF_IT_CHANGES"
+      }
+    ],
+    "recommended": false,
+    "category": "bugfix"
   },
   {
     "id": 45,
-    "name": "DSotSC — restore missing source BMPs + COPY_LARGE",
-    "description": "A previous MOVE operation consumed ar4600sr.bmp/ar8900sr.bmp (renamed them to bg5500sr/bg2400sr). Restore sources from destinations and use COPY_LARGE to make it idempotent.",
+    "name": "DSotSC \u00e2\u20ac\u201d restore pre-MOVE state (rename_if_exists)",
+    "description": "DSotSC.tp2 line 2073 does MOVE ar4600sr.bmp\u00e2\u2020\u2019bg5500sr.bmp (and ar8900sr.bmp\u00e2\u2020\u2019bg2400sr.bmp) in EET branch. This is non-idempotent: after one install the source is gone. On re-install the MOVE trips \"destination exists, falling back to COPY_LARGE\" which errors. Fix: restore the pre-MOVE state by renaming dest back to src if src is missing.",
     "target_mod": "DSotSC",
-    "trigger": { "type": "file_exists", "path": "DSotSC/DSotSC.tp2" },
-    "marker": { "file": "DSotSC/DSotSC.tp2", "text": "_eetmr_move_fix" },
+    "trigger": {
+      "type": "file_exists",
+      "path": "DSotSC/DSotSC.tp2"
+    },
+    "marker": {
+      "file": "DSotSC/base/bmp/ar8900sr.bmp"
+    },
     "ops": [
-      { "type": "copy_if_missing", "src": "DSotSC/base/bmp/bg5500sr.bmp", "dest": "DSotSC/base/bmp/ar4600sr.bmp" },
-      { "type": "copy_if_missing", "src": "DSotSC/base/bmp/bg2400sr.bmp", "dest": "DSotSC/base/bmp/ar8900sr.bmp" },
-      { "type": "replace", "file": "DSotSC/DSotSC.tp2",
-        "find": "ACTION_IF GAME_IS ~eet~ BEGIN\n\tMOVE ~DSotSC/base/bmp/ar4600sr.bmp~ ~DSotSC/base/bmp/bg5500sr.bmp~\n\t~DSotSC/base/bmp/ar8900sr.bmp~ ~DSotSC/base/bmp/bg2400sr.bmp~",
-        "replace": "// _eetmr_move_fix: replaced MOVE with COPY_LARGE (idempotent, survives retries)\nACTION_IF GAME_IS ~eet~ BEGIN\n\tCOPY_LARGE ~DSotSC/base/bmp/ar4600sr.bmp~ ~DSotSC/base/bmp/bg5500sr.bmp~\n\tCOPY_LARGE ~DSotSC/base/bmp/ar8900sr.bmp~ ~DSotSC/base/bmp/bg2400sr.bmp~" }
-    ]
+      {
+        "type": "rename_if_exists",
+        "src": "DSotSC/base/bmp/ar4600sr.bmp",
+        "dest": "DSotSC/base/bmp/bg5500sr.bmp"
+      },
+      {
+        "type": "rename_if_exists",
+        "src": "DSotSC/base/bmp/ar8900sr.bmp",
+        "dest": "DSotSC/base/bmp/bg2400sr.bmp"
+      }
+    ],
+    "recommended": true,
+    "category": "bugfix"
   },
   {
     "id": 46,
-    "name": "NTotSC — restore missing source BMPs + COPY_LARGE",
-    "description": "Same fix as DSotSC #45 — restore missing source BMPs then make MOVE idempotent with COPY_LARGE.",
+    "name": "NTotSC \u00e2\u20ac\u201d restore pre-MOVE state (rename_if_exists)",
+    "description": "NTotSC.tp2 line 2325 does MOVE ar0400sr.bmp\u00e2\u2020\u2019%Farmlands%sr.bmp (= BG0400sr.bmp in EET) and ar3400sr.bmp\u00e2\u2020\u2019%Temple%sr.bmp (= BG3400sr.bmp in EET). Same non-idempotent pattern as DSotSC. Fix: rename dest\u00e2\u2020\u2019src when in post-install state.",
     "target_mod": "ntotsc",
-    "trigger": { "type": "file_exists", "path": "ntotsc/ntotsc.tp2" },
-    "marker": { "file": "ntotsc/ntotsc.tp2", "text": "_eetmr_move_fix" },
+    "trigger": {
+      "type": "file_exists",
+      "path": "ntotsc/NTotSC.tp2"
+    },
+    "marker": {
+      "file": "ntotsc/base/bmp/ar3400sr.bmp"
+    },
     "ops": [
-      { "type": "copy_if_missing", "src": "ntotsc/base/bmp/BG0400sr.bmp", "dest": "ntotsc/base/bmp/ar0400sr.bmp" },
-      { "type": "copy_if_missing", "src": "ntotsc/base/bmp/BG2400sr.bmp", "dest": "ntotsc/base/bmp/ar8900sr.bmp" },
-      { "type": "replace", "file": "ntotsc/NTotSC.tp2",
-        "find": "ACTION_IF GAME_IS ~eet~ BEGIN\n\tMOVE ~ntotsc/base/bmp/ar0400sr.bmp~ ~NTotSC/base/bmp/BG0400sr.bmp~\n\t~ntotsc/base/bmp/ar8900sr.bmp~ ~NTotSC/base/bmp/BG2400sr.bmp~",
-        "replace": "// _eetmr_move_fix: replaced MOVE with COPY_LARGE (idempotent, survives retries)\nACTION_IF GAME_IS ~eet~ BEGIN\n\tCOPY_LARGE ~ntotsc/base/bmp/ar0400sr.bmp~ ~NTotSC/base/bmp/BG0400sr.bmp~\n\tCOPY_LARGE ~ntotsc/base/bmp/ar8900sr.bmp~ ~NTotSC/base/bmp/BG2400sr.bmp~" }
-    ]
+      {
+        "type": "rename_if_exists",
+        "src": "ntotsc/base/bmp/ar0400sr.bmp",
+        "dest": "ntotsc/base/bmp/BG0400sr.bmp"
+      },
+      {
+        "type": "rename_if_exists",
+        "src": "ntotsc/base/bmp/ar3400sr.bmp",
+        "dest": "ntotsc/base/bmp/BG3400sr.bmp"
+      }
+    ],
+    "recommended": true,
+    "category": "bugfix"
   },
   {
     "id": 47,
-    "name": "bristlelick — replace broken fl#add_kit_ee.tpa",
-    "description": "Replaces broken fl#add_kit_ee.tpa (invalid backslash at line 338) with a working version from Amber mod.",
+    "name": "bristlelick \u00e2\u20ac\u201d replace broken fl#add_kit_ee.tpa (md5 marker)",
+    "description": "Replaces broken fl#add_kit_ee.tpa (514 lines, invalid backslash continuation at line 338) with Amber mod's working version (401 lines), AND adds the lib file to Bristlelick.tp2's EET_PLATFORM_CONVERSION skip_array. Without the skip, EET's auto-conversion macro mechanically substitutes the literal '%file%' placeholders in the lib code with the lib's own path, corrupting it on second-and-subsequent installs.",
     "target_mod": "Bristlelick",
-    "trigger": { "type": "file_exists", "path": "Bristlelick/lib/fl#add_kit_ee.tpa" },
-    "marker": { "file": "Bristlelick/lib/fl#add_kit_ee.tpa", "text": "fl#add_kit_ee" },
+    "trigger": {
+      "type": "file_exists",
+      "path": "Bristlelick/lib/fl#add_kit_ee.tpa"
+    },
+    "marker": {
+      "file": "Bristlelick/lib/fl#add_kit_ee.tpa",
+      "md5": "999ab6651e4da4e1cd93b3e888937582"
+    },
     "ops": [
-      { "type": "copy", "src": "bristlelick/fl#add_kit_ee.tpa", "dest": "Bristlelick/lib/fl#add_kit_ee.tpa" }
-    ]
+      {
+        "type": "copy",
+        "src": "bristlelick/fl#add_kit_ee.tpa",
+        "dest": "Bristlelick/lib/fl#add_kit_ee.tpa"
+      },
+      {
+        "type": "replace",
+        "file": "Bristlelick/Bristlelick.tp2",
+        "find": "ACTION_DEFINE_ASSOCIATIVE_ARRAY skip_array BEGIN ~%MOD_FOLDER%/Bristlelick.tp2~ => ~~ END",
+        "replace": "ACTION_DEFINE_ASSOCIATIVE_ARRAY skip_array BEGIN ~%MOD_FOLDER%/Bristlelick.tp2~ => ~~ ~%MOD_FOLDER%/lib/fl#add_kit_ee.tpa~ => ~~ END  // _eetmr_skip_libfix"
+      }
+    ],
+    "recommended": true,
+    "category": "bugfix"
   },
   {
     "id": 48,
-    "name": "walahnan — replace broken fl#add_kit_ee.tpa",
-    "description": "Same fix as bristlelick #47 for walahnan's copy of the library.",
+    "name": "walahnan \u00e2\u20ac\u201d replace broken fl#add_kit_ee.tpa (md5 marker)",
+    "description": "Same fix as #47 for Walahnan's copy of the library. Replaces broken fl#add_kit_ee.tpa with Amber's working version, AND adds lib to Walahnan.tp2's skip_array so EET_PLATFORM_CONVERSION doesn't corrupt it.",
     "target_mod": "Walahnan",
-    "trigger": { "type": "file_exists", "path": "Walahnan/libraries/fl#add_kit_ee.tpa" },
-    "marker": { "file": "Walahnan/libraries/fl#add_kit_ee.tpa", "text": "fl#add_kit_ee" },
+    "trigger": {
+      "type": "file_exists",
+      "path": "Walahnan/libraries/fl#add_kit_ee.tpa"
+    },
+    "marker": {
+      "file": "Walahnan/libraries/fl#add_kit_ee.tpa",
+      "md5": "999ab6651e4da4e1cd93b3e888937582"
+    },
     "ops": [
-      { "type": "copy", "src": "walahnan/fl#add_kit_ee.tpa", "dest": "Walahnan/libraries/fl#add_kit_ee.tpa" }
-    ]
+      {
+        "type": "copy",
+        "src": "walahnan/fl#add_kit_ee.tpa",
+        "dest": "Walahnan/libraries/fl#add_kit_ee.tpa"
+      },
+      {
+        "type": "replace",
+        "file": "Walahnan/Walahnan.tp2",
+        "find": "ACTION_DEFINE_ASSOCIATIVE_ARRAY skip_array BEGIN ~%MOD_FOLDER%/Walahnan.tp2~ => ~~ END",
+        "replace": "ACTION_DEFINE_ASSOCIATIVE_ARRAY skip_array BEGIN ~%MOD_FOLDER%/Walahnan.tp2~ => ~~ ~%MOD_FOLDER%/libraries/fl#add_kit_ee.tpa~ => ~~ END  // _eetmr_skip_libfix"
+      }
+    ],
+    "recommended": true,
+    "category": "bugfix"
   },
   {
     "id": 49,
-    "name": "c#anotherfinehell — restore c#afhvis.baf (MOVE'd by prior install)",
-    "description": "TP2 line 148 COMPILEs c#afhvis.baf, then line 152 MOVEs it to c#afhvi1.baf. A prior install executed the MOVE, leaving the source permanently renamed. Restore c#afhvis.baf from the surviving c#afhvi1.baf before install.",
+    "name": "c#anotherfinehell \u00e2\u20ac\u201d restore pre-MOVE state (rename_if_exists)",
+    "description": "c#anotherfinehell.tp2 line 148 COMPILEs c#afhvis.baf, then line 152 MOVEs it to c#afhvi1.baf. Same non-idempotent pattern as DSotSC. Fix: rename c#afhvi1.baf back to c#afhvis.baf when in post-install state.",
     "target_mod": "c#anotherfinehell",
-    "trigger": { "type": "file_exists", "path": "c#anotherfinehell/c#anotherfinehell.tp2" },
-    "marker": { "file": "c#anotherfinehell/scripts/c#afhvis.baf", "text": "" },
+    "trigger": {
+      "type": "file_exists",
+      "path": "c#anotherfinehell/c#anotherfinehell.tp2"
+    },
+    "marker": {
+      "file": "c#anotherfinehell/scripts/c#afhvis.baf"
+    },
     "ops": [
-      { "type": "copy_if_missing", "src": "c#anotherfinehell/scripts/c#afhvi1.baf", "dest": "c#anotherfinehell/scripts/c#afhvis.baf" }
-    ]
+      {
+        "type": "rename_if_exists",
+        "src": "c#anotherfinehell/scripts/c#afhvis.baf",
+        "dest": "c#anotherfinehell/scripts/c#afhvi1.baf"
+      }
+    ],
+    "recommended": true,
+    "category": "bugfix"
+  },
+  {
+    "id": 50,
+    "name": "a7-magicstore \u00e2\u20ac\u201d BCS round-trip safety in tweak_charges",
+    "description": "[opt-in: defensive PATCH_TRY wrap, may be redundant under file_guard] Wraps the DECOMPILE_AND_PATCH in tweak_charges.tph (inside ACTION_PHP_EACH over tweak_scripts) in PATCH_TRY/WITH DEFAULT/END. Without this, any corrupt BCS in the override (e.g., ar2014.BCS from upstream patching) causes the whole batch to fail.",
+    "target_mod": "a7-magicstore",
+    "trigger": {
+      "type": "file_exists",
+      "path": "A7-MagicStore/lib/tweak_charges.tph"
+    },
+    "marker": {
+      "file": "A7-MagicStore/lib/tweak_charges.tph",
+      "text": "_eetmr_bcs_guard_v1"
+    },
+    "ops": [
+      {
+        "type": "replace",
+        "file": "A7-MagicStore/lib/tweak_charges.tph",
+        "find": "      COPY_EXISTING ~%resref%.BCS~ ~override~\n        DECOMPILE_AND_PATCH BEGIN\n          REPLACE_TEXTUALLY\n            ~GiveItemCreate(\"a7_mcsum\",\\([^,]+\\),\\([0-9]+\\),\\([0-9]+\\),\\([0-9]+\\))~\n            ~GiveItemCreate(\"a7_mcsum\",\\1,%charges%,\\3,\\4)~\n          REPLACE_TEXTUALLY\n            ~CreateItem(\"A7_MCSUM\",\\([0-9]+\\),\\([0-9]+\\),\\([0-9]+\\))~\n            ~CreateItem(\"A7_MCSUM\",%charges%,\\2,\\3)~\n        END\n      BUT_ONLY IF_EXISTS",
+        "replace": "      // _eetmr_bcs_guard_v1: wrap DECOMPILE_AND_PATCH in PATCH_TRY for round-trip safety\n      COPY_EXISTING ~%resref%.BCS~ ~override~\n        PATCH_TRY\n          DECOMPILE_AND_PATCH BEGIN\n            REPLACE_TEXTUALLY\n              ~GiveItemCreate(\"a7_mcsum\",\\([^,]+\\),\\([0-9]+\\),\\([0-9]+\\),\\([0-9]+\\))~\n              ~GiveItemCreate(\"a7_mcsum\",\\1,%charges%,\\3,\\4)~\n            REPLACE_TEXTUALLY\n              ~CreateItem(\"A7_MCSUM\",\\([0-9]+\\),\\([0-9]+\\),\\([0-9]+\\))~\n              ~CreateItem(\"A7_MCSUM\",%charges%,\\2,\\3)~\n          END\n        WITH DEFAULT\n          PATCH_PRINT ~WARNING: [%SOURCE_FILE%] BCS round-trip failed, skipping~\n        END\n      BUT_ONLY IF_EXISTS"
+      }
+    ],
+    "recommended": false,
+    "category": "bugfix"
+  },
+  {
+    "id": 51,
+    "name": "BG Travel \u00e2\u20ac\u201d restore missing TWM-detect.CoB marker file",
+    "description": "BG_Travel uses BACKUP/ as both WeiDU backup dir and source file storage. WeiDU's backup management deletes TWM-detect.CoB on uninstall. Fix: pre-create the marker file so the ALWAYS COPY at line 13 succeeds.",
+    "target_mod": "bg_travel",
+    "trigger": {
+      "type": "file_exists",
+      "path": "bg_travel/Setup-BG_Travel.TP2"
+    },
+    "marker": {
+      "file": "bg_travel/BACKUP/TWM-detect.CoB"
+    },
+    "ops": [
+      {
+        "type": "copy",
+        "src": "bg_travel/TWM-detect.CoB",
+        "dest": "bg_travel/BACKUP/TWM-detect.CoB"
+      }
+    ],
+    "recommended": true,
+    "category": "bugfix"
+  },
+  {
+    "id": 52,
+    "name": "Imoen 4 Ever \u00e2\u20ac\u201d remove erroneous banter-stub block",
+    "description": "An earlier version of this patch added banter-stub-creation code to imoen_forever.tp2 before BEGIN @9928, but imoen_forever ALREADY has identical code inside its ALWAYS block (line 278). The redundant insertion ended up in an invalid position (between LANGUAGE declarations and the first component BEGIN), causing WeiDU parse errors. This patch cleans that up: if the erroneous block is present, remove it. If absent (fresh extract), no-op.",
+    "target_mod": "imoen_forever",
+    "trigger": {
+      "type": "file_exists",
+      "path": "imoen_forever/imoen_forever.tp2"
+    },
+    "marker": {
+      "file": "imoen_forever/imoen_forever.tp2",
+      "text": "_eetmr_banter_stubs",
+      "invert": true
+    },
+    "ops": [
+      {
+        "type": "replace",
+        "file": "imoen_forever/imoen_forever.tp2",
+        "find": "ACTION_IF GAME_INCLUDES ~sod~ THEN BEGIN\n  // _eetmr_banter_stubs: SoD banter-file stub creation. SoD's banter engine\n  // creates *B.DLG files at runtime; at install time BDIMOENB/BDCORWIB/etc.\n  // don't exist, so CHAIN/APPEND_EARLY fails. Pattern borrowed from c#brage\n  // and c#greythedog which have identical stub-creation logic.\n  COPY_EXISTING ~BDBANTER.2DA~ ~%MOD_FOLDER%/install~\n    COUNT_2DA_COLS eetmr_cols\n    COUNT_2DA_ROWS eetmr_cols eetmr_rows\n    FOR ( eetmr_row = 2 ; eetmr_row < eetmr_rows ; eetmr_row = eetmr_row + 1 ) BEGIN\n      READ_2DA_ENTRY %eetmr_row% 0 2 eetmr_npc_dv\n      READ_2DA_ENTRY %eetmr_row% 1 2 eetmr_banterfile\n      INNER_ACTION BEGIN\n        ACTION_IF NOT FILE_EXISTS_IN_GAME ~%eetmr_banterfile%.dlg~ THEN BEGIN\n          <<<<<<<< .../eetmr-banter-stubs/%eetmr_banterfile%.d\n          BEGIN %eetmr_banterfile%\n          >>>>>>>>\n          COMPILE EVALUATE_BUFFER ~.../eetmr-banter-stubs/%eetmr_banterfile%.d~\n        END\n      END\n    END\n  BUT_ONLY\nEND\n\nBEGIN @9928 DESIGNATED 0 //GROUP @9921",
+        "replace": "BEGIN @9928 DESIGNATED 0 //GROUP @9921",
+        "required": false
+      }
+    ],
+    "recommended": true,
+    "category": "bugfix"
+  },
+  {
+    "id": 53,
+    "name": "Talents of Faerun \u00e2\u20ac\u201d revert buggy GLOB additions (BIFF optimization attempt)",
+    "description": "Reverts a previous failed attempt at BIFF optimization that inserted `GLOB` after the `-` modifier in 5 COPY_EXISTING_REGEXP BCS scan patterns in dw_talents. WeiDU's GLR parser rejects the `GLOB -` ordering (only `- GLOB` is valid), causing parse errors when the damaged files are encountered. Each op is a revert: it looks for the broken state (`COPY_EXISTING_REGEXP GLOB -` with the `_eetmr_glob_biff` comment) and restores the original working line (`COPY_EXISTING_REGEXP -`). All ops are `required: false`, so this safely no-ops on fresh installs that never received the buggy GLOB insertion.",
+    "target_mod": "dw_talents",
+    "trigger": {
+      "type": "dir_exists",
+      "path": "dw_talents"
+    },
+    "marker": {
+      "file": "dw_talents/class_race/barbarian_class.tpa",
+      "text": "_eetmr_glob_biff",
+      "invert": true
+    },
+    "ops": [
+      {
+        "type": "replace",
+        "file": "dw_talents/class_race/barbarian_class.tpa",
+        "find": "\t// _eetmr_glob_biff: GLOB added so biffed BCS files are still found after mid-install BIFF optimization\n\tCOPY_EXISTING_REGEXP GLOB - \".*\\.bcs\" nowhere \n\t\tPATCH_IF INDEX_BUFFER (\"1073741824\")>=0 BEGIN",
+        "replace": "\tCOPY_EXISTING_REGEXP - \".*\\.bcs\" nowhere \n\t\tPATCH_IF INDEX_BUFFER (\"1073741824\")>=0 BEGIN",
+        "required": false
+      },
+      {
+        "type": "replace",
+        "file": "dw_talents/kit/druid_multiclass.tpa",
+        "find": "\t// _eetmr_glob_biff\n\tCOPY_EXISTING_REGEXP GLOB - \".*\\.bcs\" nowhere \n\t\tPATCH_IF INDEX_BUFFER (16396)>=0 BEGIN",
+        "replace": "\tCOPY_EXISTING_REGEXP - \".*\\.bcs\" nowhere \n\t\tPATCH_IF INDEX_BUFFER (16396)>=0 BEGIN",
+        "required": false
+      },
+      {
+        "type": "replace",
+        "file": "dw_talents/kit/favored_soul.tpa",
+        "find": "\t// _eetmr_glob_biff\n\tCOPY_EXISTING_REGEXP GLOB - \".*\\.bcs\" nowhere \n\t\tPATCH_MATCH",
+        "replace": "\tCOPY_EXISTING_REGEXP - \".*\\.bcs\" nowhere \n\t\tPATCH_MATCH",
+        "required": false
+      },
+      {
+        "type": "replace",
+        "file": "dw_talents/kit/kit_bg.tpa",
+        "find": "\t// _eetmr_glob_biff\n\tCOPY_EXISTING_REGEXP GLOB - \".*\\.bcs\" nowhere \n\t\tPATCH_IF INDEX_BUFFER",
+        "replace": "\tCOPY_EXISTING_REGEXP - \".*\\.bcs\" nowhere \n\t\tPATCH_IF INDEX_BUFFER",
+        "required": false
+      },
+      {
+        "type": "replace",
+        "file": "dw_talents/subrace/subrace.tpa",
+        "find": "\t// _eetmr_glob_biff\n\tCOPY_EXISTING_REGEXP GLOB - \".*\\.bcs\" nowhere\n\t\tDECOMPILE_AND_PATCH",
+        "replace": "\tCOPY_EXISTING_REGEXP - \".*\\.bcs\" nowhere\n\t\tDECOMPILE_AND_PATCH",
+        "required": false,
+        "_eetmr_note": "Revert-op: subrace.tpa uses DECOMPILE_AND_PATCH inside a COPY_EXISTING_REGEXP ... nowhere block. Adding GLOB to that line causes WeiDU GLR parse error at the DECOMPILE_AND_PATCH token. Original (no GLOB) works because DECOMPILE_AND_PATCH handles BIF access implicitly. This op restores the original state on users who ran an earlier v1 of patch #53 that GLOB-ified this file."
+      }
+    ],
+    "recommended": false,
+    "category": "bugfix",
+    "_eetmr_recommended_note": "Set recommended:false because: (1) all five ops already have required:false, so they silently no-op on fresh installs that never received the buggy v1 GLOB insertion; (2) the patch is only useful for installs that applied the bad v1 of this same patch #53 before it was reverted. Opt-in only \u00e2\u20ac\u201d users who hit the specific GLR parse errors from v1 damage can manually enable."
+  },
+  {
+    "id": 54,
+    "name": "Sword Coast Stratagems \u00e2\u20ac\u201d BIFF Optimization (GLOB for BCS scan)",
+    "description": "Adds GLOB flag to the non-GLOB COPY_EXISTING_REGEXP BCS pattern in SCS genai_iwd.tpa so biffed BCS files are found after mid-install BIFF optimization.",
+    "target_mod": "stratagems",
+    "trigger": {
+      "type": "dir_exists",
+      "path": "stratagems"
+    },
+    "marker": {
+      "file": "stratagems/genai/genai_iwd.tpa",
+      "text": "_eetmr_glob_biff"
+    },
+    "ops": [
+      {
+        "type": "replace",
+        "file": "stratagems/genai/genai_iwd.tpa",
+        "find": "COPY_EXISTING_REGEXP \".*\\.bcs\" override",
+        "replace": "// _eetmr_glob_biff: GLOB added for mid-install BIFF optimization\nCOPY_EXISTING_REGEXP GLOB \".*\\.bcs\" override"
+      }
+    ],
+    "recommended": true,
+    "category": "performance"
+  },
+  {
+    "id": 55,
+    "name": "Trap Overhaul \u00e2\u20ac\u201d extend SPLSTATE.IDS slot search to 512",
+    "description": "trap_overhaul's ADD_SPLSTATE function loops 0-255 looking for a free SPLSTATE.IDS slot. In megainstalls with 250+ splstates (dw_talents 67, stratagems 50+, SubtleD 19, etc.), all 0-255 slots are taken. EE engines support indices >255 (stratagems uses 256-315 successfully). Fix: extend the search loop to 512.",
+    "target_mod": "Trap_Overhaul",
+    "trigger": {
+      "type": "file_exists",
+      "path": "Trap_Overhaul/setup-Trap_Overhaul.tp2"
+    },
+    "marker": {
+      "file": "Trap_Overhaul/setup-Trap_Overhaul.tp2",
+      "text": "_eetmr_splstate_break_v3"
+    },
+    "ops": [
+      {
+        "type": "replace",
+        "file": "Trap_Overhaul/setup-Trap_Overhaul.tp2",
+        "find": "FOR\t(i = 0; i < 256; ++i)",
+        "replace": "// _eetmr_splstate_break_v3 loop bump (EE engines support splstates >255)\n\t\t\t\t\t\tFOR\t(i = 0; i < 512; ++i)",
+        "required": false
+      },
+      {
+        "type": "replace",
+        "file": "Trap_Overhaul/setup-Trap_Overhaul.tp2",
+        "find": "SET\tnew_ids = i\tSET\ti = 256\tEND",
+        "replace": "// _eetmr_splstate_break_v3 break sentinel must match loop limit\n\t\t\t\t\t\t\tSET\tnew_ids = i\tSET\ti = 512\tEND"
+      }
+    ],
+    "recommended": true,
+    "category": "bugfix"
+  },
+  {
+    "id": 56,
+    "name": "Talents of Faerun \u00e2\u20ac\u201d BCS Pre-Filter callsites (v2 per-block compile)",
+    "description": "Adds pre_filter byte-token hints to each disjunctive_substitution callsite in dw_talents. Paired with v2 alter_script.tph + disjunctive_substitution.tph (ID 1) that use per-block compile architecture. pre_filter lets ALTER_SCRIPT_BLOCK skip DECOMPILE_BCS_TO_BAF on blocks that don't contain the relevant kit/class/stat byte token. Targets 5-10\u00c3\u2014 speedup on dw_talents' slowest components.",
+    "target_mod": "dw_talents",
+    "trigger": {
+      "type": "dir_exists",
+      "path": "dw_talents"
+    },
+    "marker": {
+      "file": "dw_talents/class_race/barbarian_class.tpa",
+      "text": "_eetmr_bcs_prefilter_v2"
+    },
+    "ops": [
+      {
+        "type": "replace",
+        "file": "dw_talents/class_race/barbarian_class.tpa",
+        "find": "\t\tOUTER_SPRINT match \"Kit(\\([^,]+\\),BARBARIAN)\" \n\t\tOUTER_SPRINT replace \"Class(\\1,FIGHTER_ALL)|CheckSpellState(\\1,DW_VIRTUAL_CLASS_MARKER)\"\n\t\tLAF disjunctive_substitution_bcs STR_VAR script match replace END",
+        "replace": "\t\tOUTER_SPRINT match \"Kit(\\([^,]+\\),BARBARIAN)\" \n\t\tOUTER_SPRINT replace \"Class(\\1,FIGHTER_ALL)|CheckSpellState(\\1,DW_VIRTUAL_CLASS_MARKER)\"\n\t\t// _eetmr_bcs_prefilter_v2: pre_filter=BARBARIAN kit ID (decimal)\n\t\tLAF disjunctive_substitution_bcs STR_VAR script match replace pre_filter=\"1073741824\" END"
+      },
+      {
+        "type": "replace",
+        "file": "dw_talents/kit/kit_bg.tpa",
+        "find": "\t\tOUTER_SPRINT match \"Kit(\\([^,]+\\),BLACKGUARD)\" \n\t\tOUTER_SPRINT replace \"Class(\\1,PALADIN)|CheckSpellState(\\1,DW_VIRTUAL_CLASS_MARKER)\"\n\t\tLAF disjunctive_substitution_bcs STR_VAR script match replace END",
+        "replace": "\t\tOUTER_SPRINT match \"Kit(\\([^,]+\\),BLACKGUARD)\" \n\t\tOUTER_SPRINT replace \"Class(\\1,PALADIN)|CheckSpellState(\\1,DW_VIRTUAL_CLASS_MARKER)\"\n\t\t// _eetmr_bcs_prefilter_v2: pre_filter=BLACKGUARD kit ID\n\t\tLAF disjunctive_substitution_bcs STR_VAR script match replace pre_filter=\"16416\" END"
+      },
+      {
+        "type": "replace",
+        "file": "dw_talents/kit/favored_soul.tpa",
+        "find": "\t\tOUTER_SPRINT match \"^Class(\\([^,]+\\),SHAMAN)\" \n\t\tOUTER_SPRINT replace \"Class(\\1,SHAMAN)|!CheckSpellState(\\1,%favored_soul_splstate%)\"\n\t\tLAF disjunctive_substitution_bcs STR_VAR script match replace END",
+        "replace": "\t\tOUTER_SPRINT match \"^Class(\\([^,]+\\),SHAMAN)\" \n\t\tOUTER_SPRINT replace \"Class(\\1,SHAMAN)|!CheckSpellState(\\1,%favored_soul_splstate%)\"\n\t\t// _eetmr_bcs_prefilter_v2: pre_filter=Class trigger ID (covers SHAMAN/DRUID/CLERIC branches)\n\t\tLAF disjunctive_substitution_bcs STR_VAR script match replace pre_filter=\"16396\" END"
+      },
+      {
+        "type": "replace",
+        "file": "dw_talents/kit/favored_soul.tpa",
+        "find": "\t\tOUTER_SPRINT match \"^Class(\\([^,]+\\),\\(DRUID_ALL\\|DRUID\\))\" \n\t\tOUTER_SPRINT replace \"Class(\\1,\\2)|!CheckSpellState(\\1,%favored_soul_splstate%)\"\n\t\tLAF disjunctive_substitution_bcs STR_VAR script match replace END",
+        "replace": "\t\tOUTER_SPRINT match \"^Class(\\([^,]+\\),\\(DRUID_ALL\\|DRUID\\))\" \n\t\tOUTER_SPRINT replace \"Class(\\1,\\2)|!CheckSpellState(\\1,%favored_soul_splstate%)\"\n\t\t// _eetmr_bcs_prefilter_v2\n\t\tLAF disjunctive_substitution_bcs STR_VAR script match replace pre_filter=\"16396\" END"
+      },
+      {
+        "type": "replace",
+        "file": "dw_talents/kit/favored_soul.tpa",
+        "find": "\t\tOUTER_SPRINT match \"^Class(\\([^,]+\\),\\(CLERIC_ALL\\|CLERIC\\))\" \n\t\tOUTER_SPRINT replace \"OR()Class(\\1,\\2)|CheckSpellState(\\1,%favored_soul_splstate%)\"\n\t\tLAF disjunctive_substitution_bcs STR_VAR script match replace END",
+        "replace": "\t\tOUTER_SPRINT match \"^Class(\\([^,]+\\),\\(CLERIC_ALL\\|CLERIC\\))\" \n\t\tOUTER_SPRINT replace \"OR()Class(\\1,\\2)|CheckSpellState(\\1,%favored_soul_splstate%)\"\n\t\t// _eetmr_bcs_prefilter_v2\n\t\tLAF disjunctive_substitution_bcs STR_VAR script match replace pre_filter=\"16396\" END"
+      },
+      {
+        "type": "replace",
+        "file": "dw_talents/kit/druid_multiclass.tpa",
+        "find": "\t\tLAF disjunctive_substitution STR_VAR script match=\"Class(\\([^,]*\\),DRUID_ALL)\" replace=\"OR()Class(\\1,DRUID_ALL)|CheckSpellState(\\1,DW_DRUID)\" END\n\t\tLAF disjunctive_substitution STR_VAR script match=\"Class(\\([^,]*\\),CLERIC_ALL)\" replace=\"Class(\\1,CLERIC_ALL)|!CheckSpellState(\\1,DW_DRUID)\" END",
+        "replace": "\t\t// _eetmr_bcs_prefilter_v2: Class trigger ID\n\t\tLAF disjunctive_substitution STR_VAR script match=\"Class(\\([^,]*\\),DRUID_ALL)\" replace=\"OR()Class(\\1,DRUID_ALL)|CheckSpellState(\\1,DW_DRUID)\" pre_filter=\"16396\" END\n\t\tLAF disjunctive_substitution STR_VAR script match=\"Class(\\([^,]*\\),CLERIC_ALL)\" replace=\"Class(\\1,CLERIC_ALL)|!CheckSpellState(\\1,DW_DRUID)\" pre_filter=\"16396\" END"
+      },
+      {
+        "type": "replace",
+        "file": "dw_talents/lib/reroute_stats.tph",
+        "find": "\t\tLAF disjunctive_substitution STR_VAR script match=\"CheckStatGT(\\([^,]*\\),0,WIZARD_SPELL_IMMUNITY)\" replace=\"OR()CheckSpellState(\\1,SI_ABJURATION)|CheckSpellState(\\1,SI_CONJURATION)|CheckSpellState(\\1,SI_DIVINATION)|CheckSpellState(\\1,SI_ENCHANTMENT)|CheckSpellState(\\1,SI_ILLUSION)|CheckSpellState(\\1,SI_EVOCATION)|CheckSpellState(\\1,SI_NECROMANCY)|CheckSpellState(\\1,SI_TRANSMUTATION)\" END",
+        "replace": "\t\t// _eetmr_bcs_prefilter_v2: dynamic stat ID with surrounding spaces\n\t\tLAF disjunctive_substitution STR_VAR script match=\"CheckStatGT(\\([^,]*\\),0,WIZARD_SPELL_IMMUNITY)\" replace=\"OR()CheckSpellState(\\1,SI_ABJURATION)|CheckSpellState(\\1,SI_CONJURATION)|CheckSpellState(\\1,SI_DIVINATION)|CheckSpellState(\\1,SI_ENCHANTMENT)|CheckSpellState(\\1,SI_ILLUSION)|CheckSpellState(\\1,SI_EVOCATION)|CheckSpellState(\\1,SI_NECROMANCY)|CheckSpellState(\\1,SI_TRANSMUTATION)\" pre_filter=\" %si_stat% \" END"
+      }
+    ],
+    "recommended": true,
+    "category": "performance"
+  },
+  {
+    "id": 57,
+    "name": "Imoen 4 Ever \u00e2\u20ac\u201d clear stale do-once marker",
+    "description": "imoen_forever's ALWAYS block wraps its one-time setup (banter-stub creation for BDIMOENB/BDCORWIB/etc., TRA loading) in a FILE_EXISTS guard that checks imoen_forever/Install/imoen_foreverinstall.mrk. Once the marker is created by a prior install, subsequent runs SKIP the do-once block \u00e2\u20ac\u201d meaning no banter stubs on re-install, which breaks cn:14 'Give Imoen Dialogue Content in Chapters 8-12' with 'BDIMOENB.DLG not found for CHAIN3'. Fix: rename the marker aside so the ALWAYS block re-runs. rename_if_exists is idempotent \u00e2\u20ac\u201d if the marker is already renamed/missing, no-op.",
+    "target_mod": "imoen_forever",
+    "trigger": {
+      "type": "file_exists",
+      "path": "imoen_forever/imoen_forever.tp2"
+    },
+    "marker": {
+      "file": "imoen_forever/Install/imoen_foreverinstall.mrk",
+      "invert": true
+    },
+    "ops": [
+      {
+        "type": "delete_if_exists",
+        "path": "imoen_forever/Install/imoen_foreverinstall.mrk",
+        "_eetmr_note": "rename_if_exists with swapped src/dest works but is cryptic. delete_if_exists is semantically what the ALWAYS block's !FILE_EXISTS guard actually needs \u00e2\u20ac\u201d the marker just has to not exist."
+      }
+    ],
+    "recommended": true,
+    "category": "bugfix"
+  },
+  {
+    "id": 60,
+    "name": "Enhanced Powergaming Scripts \u00e2\u20ac\u201d drop POTN18 from BUFF_PRO_DAMAGE detectable-spells table",
+    "description": "Removes the `POTN18` entry from the inline BUFF_PRO_DAMAGE.2da block in `enhanced-powergaming-scripts/lib/ds/ds.tph`. POTN18 (Potion of Absorption) is one of five potions this EPS component registers with DS tracking. On megainstalls some upstream mod leaves POTN18's ability header/structure-offsets inconsistent, which makes WeiDU's CLONE_EFFECT walker crash with 'cannot convert abil_num to an integer' \u00e2\u20ac\u201d rolling back the entire 'Accelerated Pre-Buffing Speed' component (and its 2 siblings) with AUTO_SKIP. Dropping POTN18 from DS tracking loses one buff-detection entry but keeps the component installable. Observed Test #38 batch 509.",
+    "target_mod": "enhanced-powergaming-scripts",
+    "trigger": {
+      "type": "file_exists",
+      "path": "enhanced-powergaming-scripts/lib/ds/ds.tph"
+    },
+    "marker": {
+      "file": "enhanced-powergaming-scripts/lib/ds/ds.tph",
+      "text": "POTN02\nPOTN18\nPOTN22",
+      "invert": true,
+      "_eetmr_marker_note": "Matches the 3-line broken-state sequence exactly, not just 'POTN18'. Bare 'POTN18' would false-trigger once patch #61 (PATCH_TRY wrap) reintroduces POTN18 as a substring in its explanatory comment."
+    },
+    "ops": [
+      {
+        "type": "replace",
+        "file": "enhanced-powergaming-scripts/lib/ds/ds.tph",
+        "find": "POTN02\nPOTN18\nPOTN22",
+        "replace": "POTN02\nPOTN22",
+        "required": false,
+        "_eetmr_note": "Find includes the preceding and following potion so the patch anchors to the correct inline 2da block (BUFF_PRO_DAMAGE) rather than any other POTN18 mention in the file."
+      }
+    ],
+    "recommended": false,
+    "category": "bugfix",
+    "_eetmr_superseded_by": "#61 (PATCH_TRY wrap around the CLONE_EFFECT walker). That patch handles ALL corrupt potions at once, not just POTN18 \u00e2\u20ac\u201d Test #39 still failed on POTN45 because patch #60 was whack-a-mole. Left in place as `recommended: false` so existing installs aren't re-modified unnecessarily, but it's redundant once #61 applies."
+  },
+  {
+    "id": 61,
+    "name": "Enhanced Powergaming Scripts \u00e2\u20ac\u201d PATCH_TRY wrap around DS CLONE_EFFECT walker",
+    "description": "Wraps the LPF DELETE_EFFECT + LPF CLONE_EFFECT calls inside `ds_add_detectable_data` (in `enhanced-powergaming-scripts/lib/ds/ds.tph`) with PATCH_TRY / WITH DEFAULT so items with inconsistent ability-header offsets become warnings instead of aborting the entire 'Accelerated Pre-Buffing Speed' component. The underlying bug is WeiDU's CLONE_EFFECT walker crashing with `cannot convert abil_num to an integer` on broken potions \u00e2\u20ac\u201d Test #38 caught it on POTN18, Test #39 still failed on POTN45 (from ds_simple.2da, a different inline table). Rather than patch each corrupt potion individually, this fix protects the walker call site itself, so ALL corrupted items skip cleanly with a PATCH_PRINT warning. Supersedes patch #60.",
+    "target_mod": "enhanced-powergaming-scripts",
+    "trigger": {
+      "type": "file_exists",
+      "path": "enhanced-powergaming-scripts/lib/ds/ds.tph"
+    },
+    "marker": {
+      "file": "enhanced-powergaming-scripts/lib/ds/ds.tph",
+      "text": "_eetmr_ds_patch_try"
+    },
+    "ops": [
+      {
+        "type": "replace",
+        "file": "enhanced-powergaming-scripts/lib/ds/ds.tph",
+        "find": "        COPY_EXISTING \"%filespec%\" override\n              LPF DELETE_EFFECT INT_VAR match_opcode=stat_opcode match_parameter2=stat_param END // clear out any previous version\n              LPF CLONE_EFFECT INT_VAR silent=!complain multi_match=1 match_opcode match_parameter2 opcode=stat_opcode parameter1=stat_value parameter2=stat_param special=(opcode=328) STR_VAR match_resource END\n        BUT_ONLY",
+        "replace": "        // _eetmr_ds_patch_try: wrap LPF calls in PATCH_TRY so corrupted items\n        // (broken ability offsets) emit a warning instead of aborting the component.\n        // Triggered by POTN18 (Test #38) + POTN45 (Test #39) having inconsistent\n        // ability-header offsets after upstream mods patched them \u00e2\u20ac\u201d WeiDU's\n        // CLONE_EFFECT walker then crashes with \"cannot convert abil_num to an\n        // integer\". PATCH_TRY catches this and lets the rest of the DS registration\n        // proceed.\n        COPY_EXISTING \"%filespec%\" override\n          PATCH_TRY\n              LPF DELETE_EFFECT INT_VAR match_opcode=stat_opcode match_parameter2=stat_param END // clear out any previous version\n              LPF CLONE_EFFECT INT_VAR silent=!complain multi_match=1 match_opcode match_parameter2 opcode=stat_opcode parameter1=stat_value parameter2=stat_param special=(opcode=328) STR_VAR match_resource END\n          WITH\n            DEFAULT\n              PATCH_PRINT \"_eetmr_ds_patch_try: skipped corrupted item %filespec% (ability walker crashed); DS tracking for this resource is unavailable\"\n          END\n        BUT_ONLY"
+      }
+    ],
+    "recommended": true,
+    "category": "bugfix"
+  },
+  {
+    "id": 62,
+    "name": "Imnesvale \u00e2\u20ac\u201d replace unknown CLERIC_RESIST_COLD spell with CLERIC_ENDURE_HEAT_COLD",
+    "description": "All 18 BAF scripts in `imnesvale/scripts/{easy,hard,impossible}/` call `ReallyForceSpell(Myself,CLERIC_RESIST_COLD)` but that symbol doesn't exist in BG2EE's SPELL.IDS \u00e2\u20ac\u201d the mod was written for pre-EE BG2 where the symbol was defined. WeiDU silently drops each affected line at BCS compile time (observed via `[imnesvale/scripts/easy/duarim.baf] PARSE ERROR at line 16 column 16-58` and 9 similar lines), so creatures never cast cold resistance in combat. Replaces every occurrence with `CLERIC_ENDURE_HEAT_COLD` (spell 1115) \u00e2\u20ac\u201d a real BG2EE cleric spell that grants both cold AND heat resistance. Semantically closest match; one more side-effect (heat resistance) that makes the creature slightly tougher against fire too, which matches the mod's \"hard-encounter\" intent. 18 ops, one per BAF, covering all 3 difficulty tiers so the fix works regardless of which component the user selected.",
+    "target_mod": "imnesvale",
+    "trigger": {
+      "type": "file_exists",
+      "path": "imnesvale/imnesvale.tp2"
+    },
+    "marker": {
+      "file": "imnesvale/scripts/easy/ducleric.baf",
+      "text": "CLERIC_RESIST_COLD",
+      "invert": true,
+      "_eetmr_marker_note": "ducleric.baf has exactly 1 occurrence of CLERIC_RESIST_COLD in every difficulty tier \u00e2\u20ac\u201d used as the canonical marker. After patch, no file contains CLERIC_RESIST_COLD, so the invert flips to 'already applied'."
+    },
+    "ops": [
+      {
+        "type": "replace",
+        "file": "imnesvale/scripts/easy/duarim.baf",
+        "find": "ReallyForceSpell(Myself,CLERIC_RESIST_COLD)",
+        "replace": "ReallyForceSpell(Myself,CLERIC_ENDURE_HEAT_COLD)",
+        "required": false
+      },
+      {
+        "type": "replace",
+        "file": "imnesvale/scripts/easy/duayrus.baf",
+        "find": "ReallyForceSpell(Myself,CLERIC_RESIST_COLD)",
+        "replace": "ReallyForceSpell(Myself,CLERIC_ENDURE_HEAT_COLD)",
+        "required": false
+      },
+      {
+        "type": "replace",
+        "file": "imnesvale/scripts/easy/ducleric.baf",
+        "find": "ReallyForceSpell(Myself,CLERIC_RESIST_COLD)",
+        "replace": "ReallyForceSpell(Myself,CLERIC_ENDURE_HEAT_COLD)",
+        "required": false
+      },
+      {
+        "type": "replace",
+        "file": "imnesvale/scripts/easy/dudruid.baf",
+        "find": "ReallyForceSpell(Myself,CLERIC_RESIST_COLD)",
+        "replace": "ReallyForceSpell(Myself,CLERIC_ENDURE_HEAT_COLD)",
+        "required": false
+      },
+      {
+        "type": "replace",
+        "file": "imnesvale/scripts/easy/dujug.baf",
+        "find": "ReallyForceSpell(Myself,CLERIC_RESIST_COLD)",
+        "replace": "ReallyForceSpell(Myself,CLERIC_ENDURE_HEAT_COLD)",
+        "required": false
+      },
+      {
+        "type": "replace",
+        "file": "imnesvale/scripts/easy/dumaia.baf",
+        "find": "ReallyForceSpell(Myself,CLERIC_RESIST_COLD)",
+        "replace": "ReallyForceSpell(Myself,CLERIC_ENDURE_HEAT_COLD)",
+        "required": false
+      },
+      {
+        "type": "replace",
+        "file": "imnesvale/scripts/hard/duarim.baf",
+        "find": "ReallyForceSpell(Myself,CLERIC_RESIST_COLD)",
+        "replace": "ReallyForceSpell(Myself,CLERIC_ENDURE_HEAT_COLD)",
+        "required": false
+      },
+      {
+        "type": "replace",
+        "file": "imnesvale/scripts/hard/duayrus.baf",
+        "find": "ReallyForceSpell(Myself,CLERIC_RESIST_COLD)",
+        "replace": "ReallyForceSpell(Myself,CLERIC_ENDURE_HEAT_COLD)",
+        "required": false
+      },
+      {
+        "type": "replace",
+        "file": "imnesvale/scripts/hard/ducleric.baf",
+        "find": "ReallyForceSpell(Myself,CLERIC_RESIST_COLD)",
+        "replace": "ReallyForceSpell(Myself,CLERIC_ENDURE_HEAT_COLD)",
+        "required": false
+      },
+      {
+        "type": "replace",
+        "file": "imnesvale/scripts/hard/dudruid.baf",
+        "find": "ReallyForceSpell(Myself,CLERIC_RESIST_COLD)",
+        "replace": "ReallyForceSpell(Myself,CLERIC_ENDURE_HEAT_COLD)",
+        "required": false
+      },
+      {
+        "type": "replace",
+        "file": "imnesvale/scripts/hard/dujug.baf",
+        "find": "ReallyForceSpell(Myself,CLERIC_RESIST_COLD)",
+        "replace": "ReallyForceSpell(Myself,CLERIC_ENDURE_HEAT_COLD)",
+        "required": false
+      },
+      {
+        "type": "replace",
+        "file": "imnesvale/scripts/hard/dumaia.baf",
+        "find": "ReallyForceSpell(Myself,CLERIC_RESIST_COLD)",
+        "replace": "ReallyForceSpell(Myself,CLERIC_ENDURE_HEAT_COLD)",
+        "required": false
+      },
+      {
+        "type": "replace",
+        "file": "imnesvale/scripts/impossible/duarim.baf",
+        "find": "ReallyForceSpell(Myself,CLERIC_RESIST_COLD)",
+        "replace": "ReallyForceSpell(Myself,CLERIC_ENDURE_HEAT_COLD)",
+        "required": false
+      },
+      {
+        "type": "replace",
+        "file": "imnesvale/scripts/impossible/duayrus.baf",
+        "find": "ReallyForceSpell(Myself,CLERIC_RESIST_COLD)",
+        "replace": "ReallyForceSpell(Myself,CLERIC_ENDURE_HEAT_COLD)",
+        "required": false
+      },
+      {
+        "type": "replace",
+        "file": "imnesvale/scripts/impossible/ducleric.baf",
+        "find": "ReallyForceSpell(Myself,CLERIC_RESIST_COLD)",
+        "replace": "ReallyForceSpell(Myself,CLERIC_ENDURE_HEAT_COLD)",
+        "required": false
+      },
+      {
+        "type": "replace",
+        "file": "imnesvale/scripts/impossible/dudruid.baf",
+        "find": "ReallyForceSpell(Myself,CLERIC_RESIST_COLD)",
+        "replace": "ReallyForceSpell(Myself,CLERIC_ENDURE_HEAT_COLD)",
+        "required": false
+      },
+      {
+        "type": "replace",
+        "file": "imnesvale/scripts/impossible/dujug.baf",
+        "find": "ReallyForceSpell(Myself,CLERIC_RESIST_COLD)",
+        "replace": "ReallyForceSpell(Myself,CLERIC_ENDURE_HEAT_COLD)",
+        "required": false
+      },
+      {
+        "type": "replace",
+        "file": "imnesvale/scripts/impossible/dumaia.baf",
+        "find": "ReallyForceSpell(Myself,CLERIC_RESIST_COLD)",
+        "replace": "ReallyForceSpell(Myself,CLERIC_ENDURE_HEAT_COLD)",
+        "required": false
+      }
+    ],
+    "recommended": true,
+    "category": "bugfix"
   }
 ]

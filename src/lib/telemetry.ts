@@ -5,8 +5,9 @@
 
 import { openUrl } from "@tauri-apps/plugin-opener";
 import type { InstallReport } from "./install-report";
+import { compactTrace, type InstallTrace } from "./install-trace";
 
-const TELEMETRY_REPO = "Anprionsa/eet-mod-telemetry";
+const TELEMETRY_REPO = "Anprionsa/infinity-mod-telemetry";
 
 /**
  * Build a compact version of the report for submission.
@@ -73,6 +74,45 @@ export async function shareReportOnGitHub(report: InstallReport): Promise<boolea
     ].join("\n");
 
     const params = new URLSearchParams({ title, body, labels: "install-report" });
+    const url = `https://github.com/${TELEMETRY_REPO}/issues/new?${params.toString()}`;
+
+    await openUrl(url);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Share install trace (per-component timing) via GitHub Issue. Mirrors
+ * shareReportOnGitHub: copies the compact trace to clipboard, opens the
+ * issue template in the telemetry repo. The aggregation pipeline in
+ * infinity-mod-telemetry consumes issues with the `install-trace` label.
+ */
+export async function shareTraceOnGitHub(trace: InstallTrace): Promise<boolean> {
+  try {
+    const compact = compactTrace(trace);
+    await navigator.clipboard.writeText("```json\n" + compact + "\n```");
+
+    const durationMin = Math.round(trace.totalDurationSec / 60);
+    const title = `Install Trace: ${trace.entries.length}c / ${durationMin}m ` +
+      `[${trace.rig.os}, ${trace.rig.cpuClass}]` +
+      (trace.accelerators.overrideFastDrive ? " +fast-drive" : "") +
+      (trace.accelerators.experimentalWeidu ? " +expweidu" : "");
+
+    const body = [
+      "## Install Trace",
+      "",
+      "Per-component timings from a completed install. Feeds baseline data for ETA accuracy — see Phase 7 plan.",
+      "",
+      "**Paste the JSON below** (it's already copied to your clipboard):",
+      "",
+      "<!-- Paste here (Ctrl+V) -->",
+      "",
+      "",
+    ].join("\n");
+
+    const params = new URLSearchParams({ title, body, labels: "install-trace" });
     const url = `https://github.com/${TELEMETRY_REPO}/issues/new?${params.toString()}`;
 
     await openUrl(url);

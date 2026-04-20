@@ -1,0 +1,1886 @@
+/*
+Author: CamDawg
+
+v1: for iwd fixpack v2
+v2: for iwd fixpack v3, bgee fixpack development
+  fixed bug with unterminated WRITE_ASCII for item icons
+v3: for bgee fixpack development
+  consolidated ALTER_AREA_CONTAINER_trap, cd_container_icons into new ALTER_AREA_CONTAINER
+  trapped and detected were writing to the wrong offsets in ALTER_AREA_REGION
+v4: for bgee fixpack development
+  fixed bug with patching duration_high on item headers in ALTER_ITEM_EFFECT
+v5: for bgee fixpack development
+  added support for primary, secondary schools for ALTER_ITEM_HEADER
+v6: final touchups for WeiDU inclusion
+  renamed macros to be more in line with IESDP/WeiDU conventions
+  CONVERT_BG_IWD_DURATION now converts both directions
+  ALTER_AREA_ENTRANCE, ALTER_AREA_REGION now compare the target with _CASE rather than _REGEXP
+  the immunity fx batch stuff shouldn't have been included
+  flag_backstab and flag_noinvisible support added for ALTER_ITEM_HEADER
+v7: heavy-handed editing by Wisp
+  all functions follow the naming convention ALTER_FOO_BAR instead of FOO_ALTER_BAR
+  exclude CONVERT_BG_IWD_DURATION, because I think it is too niche
+  rename a bunch of fields for increased clarity and consistency, real or imaginary
+  ALTER_*_EFFECT cannot be used to alter number or index of extended effects
+  condense pairs of item/spell functions to reduce repetition and retain the old functions as shell functions
+v8: multi-platform coding
+  functions now read version info from file and account for differences between various file formats
+  between games, e.g. iwd2's area format and every game's different cre files.   
+
+*/
+
+
+/////                                                  \\\\\
+///// area functions                                   \\\\\
+/////                                                  \\\\\
+
+DEFINE_PATCH_FUNCTION ALTER_AREA_ENTRANCE
+  INT_VAR x_coord = "-1"  // new x coordinate at 0x20; negative values mean no change
+          y_coord = "-1"  // new y coordinate at 0x22; negative values mean no change
+          orient  = "-1"  // new orientation at 0x24; negative values mean no change
+  STR_VAR entrance_name = "" // required, needs to match ascii name at 0x00
+BEGIN
+
+  READ_ASCII 0x04 version (4)
+  PATCH_IF ("%version%" STRING_COMPARE_CASE "V9.1" = 0) BEGIN // iwd2, are v9.1
+    READ_LONG  0x78 ent_off
+    READ_LONG  0x7c ent_num
+  END ELSE BEGIN
+    READ_LONG  0x68 ent_off
+    READ_LONG  0x6c ent_num
+  END
+  FOR (index = 0 ; index < ent_num ; ++index) BEGIN
+    READ_ASCII (ent_off + (index * 0x68)) ent_name (32) NULL
+    PATCH_IF ("%ent_name%" STRING_COMPARE_CASE  "%entrance_name%" = 0) BEGIN
+      PATCH_IF (x_coord >= 0) BEGIN WRITE_SHORT (ent_off + 0x20 + (index * 0x68)) x_coord END
+      PATCH_IF (y_coord >= 0) BEGIN WRITE_SHORT (ent_off + 0x22 + (index * 0x68)) y_coord END
+      PATCH_IF (orient >= 0)  BEGIN WRITE_LONG  (ent_off + 0x24 + (index * 0x68)) orient END
+    END
+  END
+
+END
+
+DEFINE_PATCH_FUNCTION ALTER_AREA_REGION
+  INT_VAR type        = "-1" // region type at 0x20; negative values mean no change
+          cursor      = "-1" // cursor type at 0x34; negative values mean no change
+          trap_detect = "-1" // difficulty of trap detection at 0x68; negative values mean no change
+          trap_remove = "-1" // difficulty of trap removal at 0x6a; negative values mean no change
+          trapped     = "-1" // is trapped? at 0x6c; negative values mean no change
+          detected    = "-1" // is detected? at 0x6e; negative values mean no change
+          // flag_ vars affect flags starting at 0x60; 0 means remove flag, 1 means add flag, -1 no change
+          flag_locked           = "-1" // locked, bit0
+          flag_resets           = "-1" // trap resets, bit1
+          flag_party_required   = "-1" // party required, bit2
+          flag_trap_detectable  = "-1" // trap can be detected, bit3
+          flag_trap_enemies     = "-1" // trap can be set off by enemies, bit4
+          flag_tutorial         = "-1" // tutorial trigger, bit5
+          flag_trap_npcs        = "-1" // trap can be set off by npcs, bit6
+          flag_silent           = "-1" // silent trigger, bit7
+          flag_deactivated      = "-1" // deactivated, bit8
+          flag_impassable_npc   = "-1" // can not be passed by npcs, bit9
+          flag_activation_point = "-1" // use activation point, bit10
+          flag_connect_to_door  = "-1" // connected to door, bit11
+          bounding_left         = "-1"
+          bounding_top          = "-1"
+          bounding_right        = "-1"
+          bounding_bottom       = "-1"
+          info_point            = 99999999
+          launch_x              = "-1"
+          launch_y              = "-1"
+          activate_x            = "-1"
+          activate_y            = "-1"
+  STR_VAR region_name = ""     // required, at 0x00, used to match region
+          destination_area    = "same" // changes destination area at 0x38; "same" means no change
+          entrance_name     = "same" // changes entrance name at 0x40; "same" means no change
+          door_key     = "same" // legacy
+          door_script  = "same" // legacy
+          region_key = EVAL "%door_key%" // resref of key to unlock at 0x74; "same" means no change
+          region_script = EVAL"%door_script%" // resref of region script at 0x7c; "same" means no change
+BEGIN
+
+
+  READ_ASCII 0x04 version (4)
+  PATCH_IF ("%version%" STRING_COMPARE_CASE "V9.1" = 0) BEGIN // iwd2, are v9.1
+    READ_SHORT 0x6a trig_num
+    READ_LONG  0x6c trig_off
+  END ELSE BEGIN
+    READ_SHORT 0x5a trig_num
+    READ_LONG  0x5c trig_off
+  END
+  FOR (index = 0 ; index < trig_num ; ++index) BEGIN
+    READ_ASCII (trig_off + (index * 0xc4)) trig_name_file (32) NULL
+    PATCH_IF ("%region_name%" STRING_COMPARE_CASE  "%trig_name_file%" = 0) BEGIN
+      PATCH_IF (type >= 0)                 BEGIN WRITE_SHORT (trig_off + 0x20 + (index * 0xc4)) type        END
+      PATCH_IF (cursor >= 0)               BEGIN WRITE_LONG  (trig_off + 0x34 + (index * 0xc4)) cursor      END
+      PATCH_IF (trap_detect >= 0)          BEGIN WRITE_SHORT (trig_off + 0x68 + (index * 0xc4)) trap_detect END
+      PATCH_IF (trap_remove >= 0)          BEGIN WRITE_SHORT (trig_off + 0x6a + (index * 0xc4)) trap_remove END
+      PATCH_IF (trapped >= 0)              BEGIN WRITE_SHORT (trig_off + 0x6c + (index * 0xc4)) trapped     END
+      PATCH_IF (detected >= 0)             BEGIN WRITE_SHORT (trig_off + 0x6e + (index * 0xc4)) detected    END
+      PATCH_IF (flag_locked = 0)           BEGIN WRITE_BYTE  (trig_off + 0x60 + (index * 0xc4)) (THIS BAND 0b11111110) END
+      PATCH_IF (flag_resets = 0)           BEGIN WRITE_BYTE  (trig_off + 0x60 + (index * 0xc4)) (THIS BAND 0b11111101) END
+      PATCH_IF (flag_party_required = 0)   BEGIN WRITE_BYTE  (trig_off + 0x60 + (index * 0xc4)) (THIS BAND 0b11111011) END
+      PATCH_IF (flag_trap_detectable = 0)  BEGIN WRITE_BYTE  (trig_off + 0x60 + (index * 0xc4)) (THIS BAND 0b11110111) END
+      PATCH_IF (flag_trap_enemies = 0)     BEGIN WRITE_BYTE  (trig_off + 0x60 + (index * 0xc4)) (THIS BAND 0b11101111) END
+      PATCH_IF (flag_tutorial = 0)         BEGIN WRITE_BYTE  (trig_off + 0x60 + (index * 0xc4)) (THIS BAND 0b11011111) END
+      PATCH_IF (flag_trap_npcs = 0)        BEGIN WRITE_BYTE  (trig_off + 0x60 + (index * 0xc4)) (THIS BAND 0b10111111) END
+      PATCH_IF (flag_silent = 0)           BEGIN WRITE_BYTE  (trig_off + 0x60 + (index * 0xc4)) (THIS BAND 0b01111111) END
+      PATCH_IF (flag_deactivated = 0)      BEGIN WRITE_BYTE  (trig_off + 0x61 + (index * 0xc4)) (THIS BAND 0b11111110) END
+      PATCH_IF (flag_impassable_npc = 0)   BEGIN WRITE_BYTE  (trig_off + 0x61 + (index * 0xc4)) (THIS BAND 0b11111101) END
+      PATCH_IF (flag_activation_point = 0) BEGIN WRITE_BYTE  (trig_off + 0x61 + (index * 0xc4)) (THIS BAND 0b11111011) END
+      PATCH_IF (flag_connect_to_door = 0)  BEGIN WRITE_BYTE  (trig_off + 0x61 + (index * 0xc4)) (THIS BAND 0b11110111) END
+      PATCH_IF (flag_locked = 1)           BEGIN WRITE_BYTE  (trig_off + 0x60 + (index * 0xc4)) (THIS BOR BIT0) END
+      PATCH_IF (flag_resets = 1)           BEGIN WRITE_BYTE  (trig_off + 0x60 + (index * 0xc4)) (THIS BOR BIT1) END
+      PATCH_IF (flag_party_required = 1)   BEGIN WRITE_BYTE  (trig_off + 0x60 + (index * 0xc4)) (THIS BOR BIT2) END
+      PATCH_IF (flag_trap_detectable = 1)  BEGIN WRITE_BYTE  (trig_off + 0x60 + (index * 0xc4)) (THIS BOR BIT3) END
+      PATCH_IF (flag_trap_enemies = 1)     BEGIN WRITE_BYTE  (trig_off + 0x60 + (index * 0xc4)) (THIS BOR BIT4) END
+      PATCH_IF (flag_tutorial = 1)         BEGIN WRITE_BYTE  (trig_off + 0x60 + (index * 0xc4)) (THIS BOR BIT5) END
+      PATCH_IF (flag_trap_npcs = 1)        BEGIN WRITE_BYTE  (trig_off + 0x60 + (index * 0xc4)) (THIS BOR BIT6) END
+      PATCH_IF (flag_silent = 1)           BEGIN WRITE_BYTE  (trig_off + 0x60 + (index * 0xc4)) (THIS BOR BIT7) END
+      PATCH_IF (flag_deactivated = 1)      BEGIN WRITE_BYTE  (trig_off + 0x61 + (index * 0xc4)) (THIS BOR BIT0) END
+      PATCH_IF (flag_impassable_npc = 1)   BEGIN WRITE_BYTE  (trig_off + 0x61 + (index * 0xc4)) (THIS BOR BIT1) END
+      PATCH_IF (flag_activation_point = 1) BEGIN WRITE_BYTE  (trig_off + 0x61 + (index * 0xc4)) (THIS BOR BIT2) END
+      PATCH_IF (flag_connect_to_door = 1)  BEGIN WRITE_BYTE  (trig_off + 0x61 + (index * 0xc4)) (THIS BOR BIT3) END
+      PATCH_IF ("%destination_area%" STRING_COMPARE_CASE "same") BEGIN
+        WRITE_ASCIIE (trig_off + 0x38 + (index * 0xc4)) "%destination_area%" #8
+      END
+      PATCH_IF ("%entrance_name%" STRING_COMPARE_CASE "same") BEGIN
+        WRITE_ASCIIE (trig_off + 0x40 + (index * 0xc4)) "%entrance_name%" #32
+      END
+      PATCH_IF ("%region_key%" STRING_COMPARE_CASE "same") BEGIN
+        WRITE_ASCIIE (trig_off + 0x74 + (index * 0xc4)) "%region_key%" #8
+      END
+      PATCH_IF ("%region_script%" STRING_COMPARE_CASE "same") BEGIN
+        WRITE_ASCIIE (trig_off + 0x7c + (index * 0xc4)) "%region_script%" #8
+      END
+      PATCH_IF (bounding_left >= 0)     BEGIN WRITE_SHORT (trig_off + 0x22 + (index * 0xc4)) bounding_left   END
+      PATCH_IF (bounding_top >= 0)      BEGIN WRITE_SHORT (trig_off + 0x24 + (index * 0xc4)) bounding_top    END
+      PATCH_IF (bounding_right >= 0)    BEGIN WRITE_SHORT (trig_off + 0x26 + (index * 0xc4)) bounding_right  END
+      PATCH_IF (bounding_bottom >= 0)   BEGIN WRITE_SHORT (trig_off + 0x28 + (index * 0xc4)) bounding_bottom END
+      PATCH_IF (info_point != 99999999) BEGIN WRITE_LONG  (trig_off + 0x64 + (index * 0xc4)) info_point      END
+      PATCH_IF (launch_x >= 0)          BEGIN WRITE_SHORT (trig_off + 0x70 + (index * 0xc4)) launch_x        END
+      PATCH_IF (launch_y >= 0)          BEGIN WRITE_SHORT (trig_off + 0x72 + (index * 0xc4)) launch_y        END
+      PATCH_IF (activate_x >= 0)        BEGIN WRITE_SHORT (trig_off + 0x84 + (index * 0xc4)) activate_x      END
+      PATCH_IF (activate_y >= 0)        BEGIN WRITE_SHORT (trig_off + 0x86 + (index * 0xc4)) activate_y      END
+    END
+  END
+
+END
+
+DEFINE_PATCH_FUNCTION ALTER_AREA_ACTOR
+  INT_VAR x_coord = "-1" // new x coordinate at 0x20 and 0x24; negative values mean no change
+          y_coord = "-1" // new y coordinate at 0x22 and 0x26; negative values mean no change
+          orient  = "-1" // facing direction for actor at 0x34; negative values mean no change
+          dest_x       = "-1"
+          dest_y       = "-1"
+          spawned      = "-1"
+          animation    = "-1"
+          expiry       = "-2"
+          wander       = "-1"
+          follow       = "-1"
+          times_talked = "-1"
+          flag_cre_unattached = "-1"
+          flag_seen_party     = "-1"
+          flag_invulnerable   = "-1"
+          flag_override_script_name   = "-1"
+          flag_time_0         = "-1"
+          flag_time_1         = "-1"
+          flag_time_2         = "-1"
+          flag_time_3         = "-1"
+          flag_time_4         = "-1"
+          flag_time_5         = "-1"
+          flag_time_6         = "-1"
+          flag_time_7         = "-1"
+          flag_time_8         = "-1"
+          flag_time_9         = "-1"
+          flag_time_10        = "-1"
+          flag_time_11        = "-1"
+          flag_time_12        = "-1"
+          flag_time_13        = "-1"
+          flag_time_14        = "-1"
+          flag_time_15        = "-1"
+          flag_time_16        = "-1"
+          flag_time_17        = "-1"
+          flag_time_18        = "-1"
+          flag_time_19        = "-1"
+          flag_time_20        = "-1"
+          flag_time_21        = "-1"
+          flag_time_22        = "-1"
+          flag_time_23        = "-1"
+
+  STR_VAR actor_name       = ""     // required, at 0x00, used to match actor
+          dlg_file         = "same" // changes dialog file at 0x48; "same" means no change
+          script_override  = "same" // changes override script at 0x50; "same" means no change
+          script_general   = "same" // changes general script at 0x58; "same" means no change
+          script_class     = "same" // changes class script at 0x60; "same" means no change
+          script_race      = "same" // changes race script at 0x68; "same" means no change
+          script_default   = "same" // changes default script at 0x70; "same" means no change
+          script_specifics = "same" // changes specifics script at 0x78; "same" means no change
+          cre_file         = "same" // changes creature file at 0x80; "same" means no change
+BEGIN
+
+  READ_ASCII 0x04 version (4)
+  PATCH_IF ("%version%" STRING_COMPARE_CASE "V9.1" = 0) BEGIN // iwd2, are v9.1
+    READ_LONG  0x64 cre_off
+    READ_SHORT 0x68 cre_num
+  END ELSE BEGIN
+    READ_LONG  0x54 cre_off
+    READ_SHORT 0x58 cre_num
+  END
+  FOR (index = 0 ; index < cre_num ; ++index) BEGIN
+    READ_ASCII (cre_off + (index * 0x110)) actor_name_file (32) NULL
+    PATCH_IF ("%actor_name%" STRING_COMPARE_CASE "%actor_name_file%" = 0) BEGIN
+      PATCH_IF (x_coord >= 0) BEGIN
+        WRITE_SHORT (cre_off + 0x20 + (index * 0x110)) x_coord
+        PATCH_IF (dest_x < 0) BEGIN
+          WRITE_SHORT (cre_off + 0x24 + (index * 0x110)) x_coord
+        END
+      END
+      PATCH_IF (y_coord >= 0) BEGIN
+        WRITE_SHORT (cre_off + 0x22 + (index * 0x110)) y_coord
+        PATCH_IF (dest_y < 0) BEGIN
+          WRITE_SHORT (cre_off + 0x26 + (index * 0x110)) y_coord
+        END
+      END
+      PATCH_IF (orient >= 0)  BEGIN WRITE_SHORT (cre_off + 0x34 + (index * 0x110)) orient END
+      PATCH_IF ("%dlg_file%" STRING_COMPARE_CASE "same") BEGIN
+        WRITE_ASCIIE (cre_off + 0x48 + (index * 0x110)) "%dlg_file%" #8
+      END
+      PATCH_IF ("%script_override%" STRING_COMPARE_CASE "same") BEGIN
+        WRITE_ASCIIE (cre_off + 0x50 + (index * 0x110)) "%script_override%" #8
+      END
+      PATCH_IF ("%script_general%" STRING_COMPARE_CASE "same") BEGIN
+        WRITE_ASCIIE (cre_off + 0x58 + (index * 0x110)) "%script_general%" #8
+      END
+      PATCH_IF ("%script_race%" STRING_COMPARE_CASE "same") BEGIN
+        WRITE_ASCIIE (cre_off + 0x68 + (index * 0x110)) "%script_race%" #8
+      END
+      PATCH_IF ("%script_default%" STRING_COMPARE_CASE "same") BEGIN
+        WRITE_ASCIIE (cre_off + 0x70 + (index * 0x110)) "%script_default%" #8
+      END
+      PATCH_IF ("%script_class%" STRING_COMPARE_CASE "same") BEGIN
+        WRITE_ASCIIE (cre_off + 0x60 + (index * 0x110)) "%script_class%" #8
+      END
+      PATCH_IF ("%script_specifics%" STRING_COMPARE_CASE "same") BEGIN
+        WRITE_ASCIIE (cre_off + 0x78 + (index * 0x110)) "%script_specifics%" #8
+      END
+      PATCH_IF ("%cre_file%" STRING_COMPARE_CASE "same") BEGIN
+        WRITE_ASCIIE (cre_off + 0x80 + (index * 0x110)) "%cre_file%" #8
+      END
+      PATCH_IF (dest_x >= 0)       BEGIN WRITE_SHORT (cre_off + 0x24 + (index * 0x110)) dest_x       END
+      PATCH_IF (dest_y >= 0)       BEGIN WRITE_SHORT (cre_off + 0x26 + (index * 0x110)) dest_y       END
+      PATCH_IF (spawned >= 0)      BEGIN WRITE_SHORT (cre_off + 0x2c + (index * 0x110)) spawned      END
+      PATCH_IF (animation >= 0)    BEGIN WRITE_LONG  (cre_off + 0x30 + (index * 0x110)) animation    END
+      PATCH_IF (expiry >= "-1")    BEGIN WRITE_LONG  (cre_off + 0x38 + (index * 0x110)) expiry       END
+      PATCH_IF (wander >= 0)       BEGIN WRITE_SHORT (cre_off + 0x3c + (index * 0x110)) wander       END
+      PATCH_IF (follow >= 0)       BEGIN WRITE_SHORT (cre_off + 0x3e + (index * 0x110)) follow       END
+      PATCH_IF (times_talked >= 0) BEGIN WRITE_LONG  (cre_off + 0x44 + (index * 0x110)) times_talked END
+      PATCH_IF (flag_cre_unattached = 0) BEGIN WRITE_BYTE  (cre_off + 0x28 + (index * 0x110)) (THIS & `BIT0) END
+      PATCH_IF (flag_cre_unattached = 1) BEGIN WRITE_BYTE  (cre_off + 0x28 + (index * 0x110)) (THIS BOR BIT0) END
+      PATCH_IF (flag_seen_party = 0)     BEGIN WRITE_BYTE  (cre_off + 0x28 + (index * 0x110)) (THIS & `BIT1) END
+      PATCH_IF (flag_seen_party = 1)     BEGIN WRITE_BYTE  (cre_off + 0x28 + (index * 0x110)) (THIS BOR BIT1) END
+      PATCH_IF (flag_invulnerable = 0)         BEGIN WRITE_BYTE  (cre_off + 0x28 + (index * 0x110)) (THIS & `BIT2) END
+      PATCH_IF (flag_invulnerable = 1)         BEGIN WRITE_BYTE  (cre_off + 0x28 + (index * 0x110)) (THIS BOR BIT2) END
+      PATCH_IF (flag_override_script_name = 0)    BEGIN WRITE_BYTE  (cre_off + 0x28 + (index * 0x110)) (THIS & `BIT3) END
+      PATCH_IF (flag_override_script_name = 1)    BEGIN WRITE_BYTE  (cre_off + 0x28 + (index * 0x110)) (THIS BOR BIT3) END
+      PATCH_IF (flag_time_0 = 0)  BEGIN WRITE_BYTE  (cre_off + 0x40 + (index * 0x110)) (THIS & `BIT0) END
+      PATCH_IF (flag_time_0 = 1)  BEGIN WRITE_BYTE  (cre_off + 0x40 + (index * 0x110)) (THIS BOR BIT0) END
+      PATCH_IF (flag_time_1 = 0)  BEGIN WRITE_BYTE  (cre_off + 0x40 + (index * 0x110)) (THIS & `BIT1) END
+      PATCH_IF (flag_time_1 = 1)  BEGIN WRITE_BYTE  (cre_off + 0x40 + (index * 0x110)) (THIS BOR BIT1) END
+      PATCH_IF (flag_time_2 = 0)  BEGIN WRITE_BYTE  (cre_off + 0x40 + (index * 0x110)) (THIS & `BIT2) END
+      PATCH_IF (flag_time_2 = 1)  BEGIN WRITE_BYTE  (cre_off + 0x40 + (index * 0x110)) (THIS BOR BIT2) END
+      PATCH_IF (flag_time_3 = 0)  BEGIN WRITE_BYTE  (cre_off + 0x40 + (index * 0x110)) (THIS & `BIT3) END
+      PATCH_IF (flag_time_3 = 1)  BEGIN WRITE_BYTE  (cre_off + 0x40 + (index * 0x110)) (THIS BOR BIT3) END
+      PATCH_IF (flag_time_4 = 0)  BEGIN WRITE_BYTE  (cre_off + 0x40 + (index * 0x110)) (THIS & `BIT4) END
+      PATCH_IF (flag_time_4 = 1)  BEGIN WRITE_BYTE  (cre_off + 0x40 + (index * 0x110)) (THIS BOR BIT4) END
+      PATCH_IF (flag_time_5 = 0)  BEGIN WRITE_BYTE  (cre_off + 0x40 + (index * 0x110)) (THIS & `BIT5) END
+      PATCH_IF (flag_time_5 = 1)  BEGIN WRITE_BYTE  (cre_off + 0x40 + (index * 0x110)) (THIS BOR BIT5) END
+      PATCH_IF (flag_time_6 = 0)  BEGIN WRITE_BYTE  (cre_off + 0x40 + (index * 0x110)) (THIS & `BIT6) END
+      PATCH_IF (flag_time_6 = 1)  BEGIN WRITE_BYTE  (cre_off + 0x40 + (index * 0x110)) (THIS BOR BIT6) END
+      PATCH_IF (flag_time_7 = 0)  BEGIN WRITE_BYTE  (cre_off + 0x40 + (index * 0x110)) (THIS & `BIT7) END
+      PATCH_IF (flag_time_7 = 1)  BEGIN WRITE_BYTE  (cre_off + 0x40 + (index * 0x110)) (THIS BOR BIT7) END
+      PATCH_IF (flag_time_8 = 0)  BEGIN WRITE_BYTE  (cre_off + 0x41 + (index * 0x110)) (THIS & `BIT0) END
+      PATCH_IF (flag_time_8 = 1)  BEGIN WRITE_BYTE  (cre_off + 0x41 + (index * 0x110)) (THIS BOR BIT0) END
+      PATCH_IF (flag_time_9 = 0)  BEGIN WRITE_BYTE  (cre_off + 0x41 + (index * 0x110)) (THIS & `BIT1) END
+      PATCH_IF (flag_time_9 = 1)  BEGIN WRITE_BYTE  (cre_off + 0x41 + (index * 0x110)) (THIS BOR BIT1) END
+      PATCH_IF (flag_time_10 = 0) BEGIN WRITE_BYTE  (cre_off + 0x41 + (index * 0x110)) (THIS & `BIT2) END
+      PATCH_IF (flag_time_10 = 1) BEGIN WRITE_BYTE  (cre_off + 0x41 + (index * 0x110)) (THIS BOR BIT2) END
+      PATCH_IF (flag_time_11 = 0) BEGIN WRITE_BYTE  (cre_off + 0x41 + (index * 0x110)) (THIS & `BIT3) END
+      PATCH_IF (flag_time_11 = 1) BEGIN WRITE_BYTE  (cre_off + 0x41 + (index * 0x110)) (THIS BOR BIT3) END
+      PATCH_IF (flag_time_12 = 0) BEGIN WRITE_BYTE  (cre_off + 0x41 + (index * 0x110)) (THIS & `BIT4) END
+      PATCH_IF (flag_time_12 = 1) BEGIN WRITE_BYTE  (cre_off + 0x41 + (index * 0x110)) (THIS BOR BIT4) END
+      PATCH_IF (flag_time_13 = 0) BEGIN WRITE_BYTE  (cre_off + 0x41 + (index * 0x110)) (THIS & `BIT5) END
+      PATCH_IF (flag_time_13 = 1) BEGIN WRITE_BYTE  (cre_off + 0x41 + (index * 0x110)) (THIS BOR BIT5) END
+      PATCH_IF (flag_time_14 = 0) BEGIN WRITE_BYTE  (cre_off + 0x41 + (index * 0x110)) (THIS & `BIT6) END
+      PATCH_IF (flag_time_14 = 1) BEGIN WRITE_BYTE  (cre_off + 0x41 + (index * 0x110)) (THIS BOR BIT6) END
+      PATCH_IF (flag_time_15 = 0) BEGIN WRITE_BYTE  (cre_off + 0x41 + (index * 0x110)) (THIS & `BIT7) END
+      PATCH_IF (flag_time_15 = 1) BEGIN WRITE_BYTE  (cre_off + 0x41 + (index * 0x110)) (THIS BOR BIT7) END
+      PATCH_IF (flag_time_16 = 0) BEGIN WRITE_BYTE  (cre_off + 0x42 + (index * 0x110)) (THIS & `BIT0) END
+      PATCH_IF (flag_time_16 = 1) BEGIN WRITE_BYTE  (cre_off + 0x42 + (index * 0x110)) (THIS BOR BIT0) END
+      PATCH_IF (flag_time_17 = 0) BEGIN WRITE_BYTE  (cre_off + 0x42 + (index * 0x110)) (THIS & `BIT1) END
+      PATCH_IF (flag_time_17 = 1) BEGIN WRITE_BYTE  (cre_off + 0x42 + (index * 0x110)) (THIS BOR BIT1) END
+      PATCH_IF (flag_time_18 = 0) BEGIN WRITE_BYTE  (cre_off + 0x42 + (index * 0x110)) (THIS & `BIT2) END
+      PATCH_IF (flag_time_18 = 1) BEGIN WRITE_BYTE  (cre_off + 0x42 + (index * 0x110)) (THIS BOR BIT2) END
+      PATCH_IF (flag_time_19 = 0) BEGIN WRITE_BYTE  (cre_off + 0x42 + (index * 0x110)) (THIS & `BIT3) END
+      PATCH_IF (flag_time_19 = 1) BEGIN WRITE_BYTE  (cre_off + 0x42 + (index * 0x110)) (THIS BOR BIT3) END
+      PATCH_IF (flag_time_20 = 0) BEGIN WRITE_BYTE  (cre_off + 0x42 + (index * 0x110)) (THIS & `BIT4) END
+      PATCH_IF (flag_time_20 = 1) BEGIN WRITE_BYTE  (cre_off + 0x42 + (index * 0x110)) (THIS BOR BIT4) END
+      PATCH_IF (flag_time_21 = 0) BEGIN WRITE_BYTE  (cre_off + 0x42 + (index * 0x110)) (THIS & `BIT5) END
+      PATCH_IF (flag_time_21 = 1) BEGIN WRITE_BYTE  (cre_off + 0x42 + (index * 0x110)) (THIS BOR BIT5) END
+      PATCH_IF (flag_time_22 = 0) BEGIN WRITE_BYTE  (cre_off + 0x42 + (index * 0x110)) (THIS & `BIT6) END
+      PATCH_IF (flag_time_22 = 1) BEGIN WRITE_BYTE  (cre_off + 0x42 + (index * 0x110)) (THIS BOR BIT6) END
+      PATCH_IF (flag_time_23 = 0) BEGIN WRITE_BYTE  (cre_off + 0x42 + (index * 0x110)) (THIS & `BIT7) END
+      PATCH_IF (flag_time_23 = 1) BEGIN WRITE_BYTE  (cre_off + 0x42 + (index * 0x110)) (THIS BOR BIT7) END
+    END
+  END
+
+END
+
+DEFINE_PATCH_FUNCTION ALTER_AREA_CONTAINER
+  INT_VAR container_type  = "-1" // container type; icon displayed when opened at 0x24; negative values mean no change
+          trapped         = "-1" // is trapped? at 0x30; negative values mean no change
+          detected        = "-1" // is detected? at 0x32; negative values mean no change
+          lockpick_strref = "-1" // lockpick string at 0x84; negative values mean no change
+          lock_difficulty = "-1" // difficulty to pick lock at 0x26; negative values mean no change
+          trap_detect     = "-1" // difficulty to detect trap at 0x2c; negative values mean no change
+          trap_remove     = "-1" // difficulty to remove tap at 0x2e; negative values mean no change
+          // flag_ vars affect flags starting at 0x28; 0 means remove flag, 1 means add flag, -1 no change
+          flag_locked     = "-1" // locked, bit0
+          flag_mlocked    = "-1" // magical lock, bit2
+          flag_resets     = "-1" // trap resets, bit3
+          flag_disabled   = "-1" // disabled, bit5
+          coord_x         = "-1"
+          coord_y         = "-1"
+          launch_x        = "-1"
+          launch_y        = "-1"
+          bounding_left   = "-1"
+          bounding_top    = "-1"
+          bounding_right  = "-1"
+          bounding_bottom = "-1"
+          range           = "-1"
+  STR_VAR container_name  = ""   // required, at 0x00, used to match container
+          container_script = "same" // changes container script at 0x48; "same" means no change
+          container_key    = "same" // changes container key 0x78; "same" means no change
+BEGIN
+
+  READ_ASCII 0x04 version (4)
+  PATCH_IF ("%version%" STRING_COMPARE_CASE "V9.1" = 0) BEGIN // iwd2, are v9.1
+    READ_LONG  0x80 cont_off
+    READ_SHORT 0x84 cont_num
+  END ELSE BEGIN
+    READ_LONG  0x70 cont_off
+    READ_SHORT 0x74 cont_num
+  END
+  FOR (index = 0 ; index < cont_num ; ++index) BEGIN
+    READ_ASCII (cont_off + (index * 0xc0)) cont_name_file (32) NULL
+    PATCH_IF ("%container_name%" STRING_COMPARE_CASE "%cont_name_file%" = 0) BEGIN
+      PATCH_IF (container_type  >= 0) BEGIN WRITE_SHORT (cont_off + 0x24 + (index * 0xc0)) container_type  END
+      PATCH_IF (lock_difficulty >= 0) BEGIN WRITE_SHORT (cont_off + 0x26 + (index * 0xc0)) lock_difficulty END
+      PATCH_IF (trap_detect     >= 0) BEGIN WRITE_SHORT (cont_off + 0x2c + (index * 0xc0)) trap_detect     END
+      PATCH_IF (trap_remove     >= 0) BEGIN WRITE_SHORT (cont_off + 0x2e + (index * 0xc0)) trap_remove     END
+      PATCH_IF (trapped         >= 0) BEGIN WRITE_SHORT (cont_off + 0x30 + (index * 0xc0)) trapped         END
+      PATCH_IF (detected        >= 0) BEGIN WRITE_SHORT (cont_off + 0x32 + (index * 0xc0)) detected        END
+      PATCH_IF (lockpick_strref >= 0) BEGIN WRITE_LONG  (cont_off + 0x84 + (index * 0xc0)) lockpick_strref END
+
+      PATCH_IF (flag_locked   = 0) BEGIN WRITE_BYTE  (cont_off + 0x28 + (index * 0xc0)) THIS & `BIT0 END
+      PATCH_IF (flag_mlocked  = 0) BEGIN WRITE_BYTE  (cont_off + 0x28 + (index * 0xc0)) THIS & `BIT2 END
+      PATCH_IF (flag_resets   = 0) BEGIN WRITE_BYTE  (cont_off + 0x28 + (index * 0xc0)) THIS & `BIT3 END
+      PATCH_IF (flag_disabled = 0) BEGIN WRITE_BYTE  (cont_off + 0x28 + (index * 0xc0)) THIS & `BIT5 END
+      PATCH_IF (flag_locked   = 1) BEGIN WRITE_BYTE  (cont_off + 0x28 + (index * 0xc0)) THIS | BIT0  END
+      PATCH_IF (flag_mlocked  = 1) BEGIN WRITE_BYTE  (cont_off + 0x28 + (index * 0xc0)) THIS | BIT2  END
+      PATCH_IF (flag_resets   = 1) BEGIN WRITE_BYTE  (cont_off + 0x28 + (index * 0xc0)) THIS | BIT3  END
+      PATCH_IF (flag_disabled = 1) BEGIN WRITE_BYTE  (cont_off + 0x28 + (index * 0xc0)) THIS | BIT5  END
+
+      PATCH_IF ("%container_script%" STRING_COMPARE_CASE "same") BEGIN
+        WRITE_ASCIIE (cont_off + 0x48 + (index * 0xc0)) "%container_script%" #8
+      END
+      PATCH_IF ("%container_key%" STRING_COMPARE_CASE "same") BEGIN
+        WRITE_ASCIIE (cont_off + 0x78 + (index * 0xc0)) "%container_key%" #8
+      END
+
+      PATCH_IF (coord_x  >= 0)                BEGIN WRITE_SHORT (cont_off + 0x20 + (index * 0xc0)) coord_x         END
+      PATCH_IF (coord_y  >= 0)                BEGIN WRITE_SHORT (cont_off + 0x22 + (index * 0xc0)) coord_y         END
+      PATCH_IF (launch_x  >= 0)               BEGIN WRITE_SHORT (cont_off + 0x34 + (index * 0xc0)) launch_x        END
+      PATCH_IF (launch_y  >= 0)               BEGIN WRITE_SHORT (cont_off + 0x36 + (index * 0xc0)) launch_y        END
+      PATCH_IF (bounding_left  >= 0)          BEGIN WRITE_SHORT (cont_off + 0x38 + (index * 0xc0)) bounding_left   END
+      PATCH_IF (bounding_top  >= 0)           BEGIN WRITE_SHORT (cont_off + 0x3a + (index * 0xc0)) bounding_top    END
+      PATCH_IF (bounding_right  >= 0)         BEGIN WRITE_SHORT (cont_off + 0x3c + (index * 0xc0)) bounding_right  END
+      PATCH_IF (bounding_bottom  >= 0)        BEGIN WRITE_SHORT (cont_off + 0x3e + (index * 0xc0)) bounding_bottom END
+      PATCH_IF (range  >= 0)                  BEGIN WRITE_SHORT (cont_off + 0x56 + (index * 0xc0)) range           END
+    END
+  END
+
+END
+
+DEFINE_PATCH_FUNCTION ALTER_AREA_DOOR
+  INT_VAR cursor          = "-1" // changes cursor at 0x68; negative values mean no change
+          trap_detect     = "-1" // difficulty of trap detection at 0x6c; negative values mean no change
+          trap_remove     = "-1" // difficulty of trap removal at 0x6e; negative values mean no change
+          trapped         = "-1" // is trapped? at 0x70; negative values mean no change
+          detected        = "-1" // is detected? at 0x72; negative values mean no change
+          door_detect     = "-1" // difficulty of detection at 0x88; negative values mean no change
+          lock_difficulty = "-1" // difficulty of lock at 0x8c; negative values mean no change
+          flag_open         = "-1"
+          flag_locked       = "-1"
+          flag_resets       = "-1"
+          flag_detectable   = "-1"
+          flag_forced       = "-1"
+          flag_no_close     = "-1"
+          flag_located      = "-1"
+          flag_secret       = "-1"
+          flag_detected     = "-1"
+          flag_no_look      = "-1"
+          flag_uses_key     = "-1"
+          flag_sliding      = "-1"
+          bounding_open_left   = "-1"
+          bounding_open_top    = "-1"
+          bounding_open_right  = "-1"
+          bounding_open_bottom = "-1"
+          bounding_closed_left   = "-1"
+          bounding_closed_top    = "-1"
+          bounding_closed_right  = "-1"
+          bounding_closed_bottom = "-1"
+          door_hp           = "-1"
+          door_ac           = "-1"
+          launch_x          = "-1"
+          launch_y          = "-1"
+          open_x            = "-1"
+          open_y            = "-1"
+          close_x           = "-1"
+          close_y           = "-1"
+          string_unlock     = 99999999
+          string_speaker    = 99999999
+
+  STR_VAR door_name   = ""     // required, at 0x00, used to match door
+          door_key    = "same" // changes door key at 0x78; "same" means no change
+          door_script = "same" // changes door script at 0x80; "same" means no change; "same" means no change
+          door_open_sound  = "same"
+          door_close_sound = "same"
+          travel_trigger = "same"
+          dialogue       = "same"
+BEGIN
+
+  READ_ASCII 0x04 version (4)
+  PATCH_IF ("%version%" STRING_COMPARE_CASE "V9.1" = 0) BEGIN // iwd2, are v9.1
+    READ_LONG 0xb4 door_num
+    READ_LONG 0xb8 door_off
+  END ELSE BEGIN
+    READ_LONG 0xa4 door_num
+    READ_LONG 0xa8 door_off
+  END
+  FOR (index = 0 ; index < door_num ; ++index) BEGIN
+    READ_ASCII (door_off + (index * 0xc8)) door_name_file (32) NULL
+    PATCH_IF ("%door_name%" STRING_COMPARE_CASE "%door_name_file%" = 0) BEGIN
+      PATCH_IF (cursor          >= 0) BEGIN WRITE_LONG  (door_off + 0x68 + (index * 0xc8)) cursor          END
+      PATCH_IF (trap_detect     >= 0) BEGIN WRITE_SHORT (door_off + 0x6c + (index * 0xc8)) trap_detect     END
+      PATCH_IF (trap_remove     >= 0) BEGIN WRITE_SHORT (door_off + 0x6e + (index * 0xc8)) trap_remove     END
+      PATCH_IF (trapped         >= 0) BEGIN WRITE_SHORT (door_off + 0x70 + (index * 0xc8)) trapped         END
+      PATCH_IF (detected        >= 0) BEGIN WRITE_SHORT (door_off + 0x72 + (index * 0xc8)) detected        END
+      PATCH_IF (door_detect     >= 0) BEGIN WRITE_LONG  (door_off + 0x88 + (index * 0xc8)) door_detect     END
+      PATCH_IF (lock_difficulty >= 0) BEGIN WRITE_LONG  (door_off + 0x8c + (index * 0xc8)) lock_difficulty END
+
+      PATCH_IF ("%door_key%" STRING_COMPARE_CASE "same") BEGIN
+        WRITE_ASCIIE (door_off + 0x78 + (index * 0xc8)) "%door_key%" #8
+      END
+      PATCH_IF ("%door_script%" STRING_COMPARE_CASE "same") BEGIN
+        WRITE_ASCIIE (door_off + 0x80 + (index * 0xc8)) "%door_script%" #8
+      END
+
+      PATCH_IF (flag_open       = 0) BEGIN WRITE_BYTE  (door_off + 0x28 + (index * 0xc8)) THIS & `BIT0 END
+      PATCH_IF (flag_open       = 1) BEGIN WRITE_BYTE  (door_off + 0x28 + (index * 0xc8)) THIS |  BIT0 END
+      PATCH_IF (flag_locked     = 0) BEGIN WRITE_BYTE  (door_off + 0x28 + (index * 0xc8)) THIS & `BIT1 END
+      PATCH_IF (flag_locked     = 1) BEGIN WRITE_BYTE  (door_off + 0x28 + (index * 0xc8)) THIS |  BIT1 END
+      PATCH_IF (flag_resets     = 0) BEGIN WRITE_BYTE  (door_off + 0x28 + (index * 0xc8)) THIS & `BIT2 END
+      PATCH_IF (flag_resets     = 1) BEGIN WRITE_BYTE  (door_off + 0x28 + (index * 0xc8)) THIS |  BIT2 END
+      PATCH_IF (flag_detectable = 0) BEGIN WRITE_BYTE  (door_off + 0x28 + (index * 0xc8)) THIS & `BIT3 END
+      PATCH_IF (flag_detectable = 1) BEGIN WRITE_BYTE  (door_off + 0x28 + (index * 0xc8)) THIS |  BIT3 END
+      PATCH_IF (flag_forced     = 0) BEGIN WRITE_BYTE  (door_off + 0x28 + (index * 0xc8)) THIS & `BIT4 END
+      PATCH_IF (flag_forced     = 1) BEGIN WRITE_BYTE  (door_off + 0x28 + (index * 0xc8)) THIS |  BIT4 END
+      PATCH_IF (flag_no_close   = 0) BEGIN WRITE_BYTE  (door_off + 0x28 + (index * 0xc8)) THIS & `BIT5 END
+      PATCH_IF (flag_no_close   = 1) BEGIN WRITE_BYTE  (door_off + 0x28 + (index * 0xc8)) THIS |  BIT5 END
+      PATCH_IF (flag_located    = 0) BEGIN WRITE_BYTE  (door_off + 0x28 + (index * 0xc8)) THIS & `BIT6 END
+      PATCH_IF (flag_located    = 1) BEGIN WRITE_BYTE  (door_off + 0x28 + (index * 0xc8)) THIS |  BIT6 END
+      PATCH_IF (flag_secret     = 0) BEGIN WRITE_BYTE  (door_off + 0x28 + (index * 0xc8)) THIS & `BIT7 END
+      PATCH_IF (flag_secret     = 1) BEGIN WRITE_BYTE  (door_off + 0x28 + (index * 0xc8)) THIS |  BIT7 END
+      PATCH_IF (flag_detected   = 0) BEGIN WRITE_BYTE  (door_off + 0x29 + (index * 0xc8)) THIS & `BIT0 END
+      PATCH_IF (flag_detected   = 1) BEGIN WRITE_BYTE  (door_off + 0x29 + (index * 0xc8)) THIS |  BIT0 END
+      PATCH_IF (flag_no_look    = 0) BEGIN WRITE_BYTE  (door_off + 0x29 + (index * 0xc8)) THIS & `BIT1 END
+      PATCH_IF (flag_no_look    = 1) BEGIN WRITE_BYTE  (door_off + 0x29 + (index * 0xc8)) THIS |  BIT1 END
+      PATCH_IF (flag_uses_key   = 0) BEGIN WRITE_BYTE  (door_off + 0x29 + (index * 0xc8)) THIS & `BIT2 END
+      PATCH_IF (flag_uses_key   = 1) BEGIN WRITE_BYTE  (door_off + 0x29 + (index * 0xc8)) THIS |  BIT2 END
+      PATCH_IF (flag_sliding    = 0) BEGIN WRITE_BYTE  (door_off + 0x29 + (index * 0xc8)) THIS & `BIT3 END
+      PATCH_IF (flag_sliding    = 1) BEGIN WRITE_BYTE  (door_off + 0x29 + (index * 0xc8)) THIS |  BIT3 END
+
+      PATCH_IF (bounding_open_left       >= 0) BEGIN WRITE_SHORT (door_off + 0x38 + (index * 0xc8)) bounding_open_left   END
+      PATCH_IF (bounding_open_top        >= 0) BEGIN WRITE_SHORT (door_off + 0x3a + (index * 0xc8)) bounding_open_top    END
+      PATCH_IF (bounding_open_right      >= 0) BEGIN WRITE_SHORT (door_off + 0x3c + (index * 0xc8)) bounding_open_right  END
+      PATCH_IF (bounding_open_bottom     >= 0) BEGIN WRITE_SHORT (door_off + 0x3e + (index * 0xc8)) bounding_open_bottom END
+      PATCH_IF (bounding_closed_left       >= 0) BEGIN WRITE_SHORT (door_off + 0x40 + (index * 0xc8)) bounding_closed_left   END
+      PATCH_IF (bounding_closed_top        >= 0) BEGIN WRITE_SHORT (door_off + 0x42 + (index * 0xc8)) bounding_closed_top    END
+      PATCH_IF (bounding_closed_right      >= 0) BEGIN WRITE_SHORT (door_off + 0x44 + (index * 0xc8)) bounding_closed_right  END
+      PATCH_IF (bounding_closed_bottom     >= 0) BEGIN WRITE_SHORT (door_off + 0x46 + (index * 0xc8)) bounding_closed_bottom END
+      PATCH_IF (door_hp               >= 0) BEGIN WRITE_SHORT (door_off + 0x54 + (index * 0xc8)) door_hp           END
+      PATCH_IF (door_ac               >= 0) BEGIN WRITE_SHORT (door_off + 0x56 + (index * 0xc8)) door_ac           END
+      PATCH_IF (launch_x              >= 0) BEGIN WRITE_SHORT (door_off + 0x74 + (index * 0xc8)) launch_x          END
+      PATCH_IF (launch_y              >= 0) BEGIN WRITE_SHORT (door_off + 0x76 + (index * 0xc8)) launch_y          END
+      PATCH_IF (open_x                >= 0) BEGIN WRITE_SHORT (door_off + 0x90 + (index * 0xc8)) open_x            END
+      PATCH_IF (open_y                >= 0) BEGIN WRITE_SHORT (door_off + 0x92 + (index * 0xc8)) open_y            END
+      PATCH_IF (close_x               >= 0) BEGIN WRITE_SHORT (door_off + 0x94 + (index * 0xc8)) close_x           END
+      PATCH_IF (close_y               >= 0) BEGIN WRITE_SHORT (door_off + 0x96 + (index * 0xc8)) close_y           END
+      PATCH_IF (string_unlock  != 99999999) BEGIN WRITE_LONG  (door_off + 0x98 + (index * 0xc8)) string_unlock     END
+      PATCH_IF (string_speaker != 99999999) BEGIN WRITE_LONG  (door_off + 0xb4 + (index * 0xc8)) string_speaker    END
+
+      PATCH_IF ("%door_open_sound%" STRING_COMPARE_CASE "same") BEGIN
+        WRITE_ASCIIE (door_off + 0x58 + (index * 0xc8)) "%door_open_sound%" #8
+      END
+      PATCH_IF ("%door_close_sound%" STRING_COMPARE_CASE "same") BEGIN
+        WRITE_ASCIIE (door_off + 0x60 + (index * 0xc8)) "%door_close_sound%" #8
+      END
+      PATCH_IF ("%travel_trigger%" STRING_COMPARE_CASE "same") BEGIN
+        WRITE_ASCIIE (door_off + 0x9c + (index * 0xc8)) "%travel_trigger%" #24
+      END
+      PATCH_IF ("%dialogue%" STRING_COMPARE_CASE "same") BEGIN
+        WRITE_ASCIIE (door_off + 0xb8 + (index * 0xc8)) "%dialogue%" #8
+      END
+    END
+  END
+
+END
+
+/////                                                  \\\\\
+///// item/spell functions                             \\\\\
+/////                                                  \\\\\
+
+DEFINE_PATCH_FUNCTION ALTER_ITMSPL_EFFECT
+  INT_VAR
+    check_globals  = 0      // check global effects: 0 for no, 1 for yes
+    check_headers  = 0      // check effects on headers; 0 for no, 1 for yes
+    header         = 0      // add to this header; 0 for all headers
+    header_type    = "-1"   // -1 to check all headers, otherwise use type specified
+    match_opcode   = "-1"   // opcode at 0x00 to match, use -1 for all
+    new_opcode     = "-1"   // if opcode matches, change to this value
+    target         = "-1"   // change target at 0x02; negative values mean no change
+    timing         = "-1"   // change timing at 0x0c; negative values mean no change
+    power          = "-1"   // change power level at 0x03; negative values mean no change
+    parameter1     = "-1"   // change parameter at 0x04; negative values mean no change
+    parameter2     = "-1"   // change parameter at 0x08; negative values mean no change
+    resist_dispel  = "-1"   // change resist/dispel at 0x0d; negative values mean no change
+    duration       = "-1"   // change duration at 0x0e; negative values mean no change
+    duration_high  = "-1"   // same as duration, but only if existing duration > 5
+    probability1   = "-1"   // change high probability at 0x12; negative values mean no change
+    probability2   = "-1"   // change low probability at 0x13; negative values mean no change
+    dicenumber     = "-1"   // change number of dice at 0x1c; negative values mean no change
+    dicesize       = "-1"   // change size of dice at 0x20; negative values mean no change
+    savingthrow    = "-1"   // changing type of saving throw at 0x24; negative values mean no change
+    savebonus      = "-11"  // change save bonus/penalty; values -11 or lower are ignored
+    special        = "-1"   // change special; negative values mean no change
+    header_length = 0x38
+  STR_VAR
+    resource       = "same" // resref at 0x14; same means no change, otherwise use this value
+BEGIN
+
+  READ_LONG 0x6a fx_off
+  PATCH_IF (check_globals = 1) BEGIN
+    READ_SHORT 0x70 fx_num
+    FOR (index = 0 ; index < fx_num ; ++index) BEGIN
+      READ_SHORT (fx_off +        (index * 0x30)) opcode_file
+      PATCH_IF ((match_opcode = opcode_file) OR (match_opcode < 0)) BEGIN
+        PATCH_IF (new_opcode >= 0)    BEGIN WRITE_SHORT (fx_off +        (index * 0x30)) new_opcode    END
+        PATCH_IF (target >= 0)        BEGIN WRITE_BYTE  (fx_off + 0x02 + (index * 0x30)) target        END
+        PATCH_IF (power >= 0)         BEGIN WRITE_BYTE  (fx_off + 0x03 + (index * 0x30)) power         END
+        PATCH_IF (parameter1 >= 0)    BEGIN WRITE_LONG  (fx_off + 0x04 + (index * 0x30)) parameter1    END
+        PATCH_IF (parameter2 >= 0)    BEGIN WRITE_LONG  (fx_off + 0x08 + (index * 0x30)) parameter2    END
+        PATCH_IF (timing >= 0)        BEGIN WRITE_BYTE  (fx_off + 0x0c + (index * 0x30)) timing        END
+        PATCH_IF (resist_dispel >= 0) BEGIN WRITE_BYTE  (fx_off + 0x0d + (index * 0x30)) resist_dispel END
+        PATCH_IF (duration >= 0)      BEGIN WRITE_LONG  (fx_off + 0x0e + (index * 0x30)) duration      END
+        PATCH_IF (probability1 >= 0)  BEGIN WRITE_BYTE  (fx_off + 0x12 + (index * 0x30)) probability1  END
+        PATCH_IF (probability2 >= 0)  BEGIN WRITE_BYTE  (fx_off + 0x13 + (index * 0x30)) probability2  END
+        PATCH_IF (dicenumber >= 0)    BEGIN WRITE_LONG  (fx_off + 0x1c + (index * 0x30)) dicenumber    END
+        PATCH_IF (dicesize >= 0)      BEGIN WRITE_LONG  (fx_off + 0x20 + (index * 0x30)) dicesize      END
+        PATCH_IF (savingthrow >= 0)   BEGIN WRITE_LONG  (fx_off + 0x24 + (index * 0x30)) savingthrow   END
+        PATCH_IF (savebonus >= "-10") BEGIN WRITE_LONG  (fx_off + 0x28 + (index * 0x30)) savebonus     END
+        PATCH_IF (special >= 0)       BEGIN WRITE_LONG  (fx_off + 0x2c + (index * 0x30)) special       END
+        PATCH_IF (duration_high >= 0) BEGIN
+          READ_LONG (fx_off + 0x0e + (index * 0x30)) duration_file
+          PATCH_IF (duration_file > 5) BEGIN
+            WRITE_LONG (fx_off + 0x0e + (index * 0x30)) duration_high
+          END
+        END
+        PATCH_IF ("%resource%" STRING_COMPARE_CASE "same") BEGIN
+          WRITE_ASCIIE (fx_off + 0x14 + (index * 0x30)) "%resource%" #8
+        END
+      END
+    END
+  END
+  PATCH_IF (check_headers = 1) BEGIN
+    READ_LONG   0x64 "abil_off"
+    READ_SHORT  0x68 "abil_num"
+    PATCH_IF (header = 0) BEGIN SET loop_start = 0            SET loop_end = abil_num END
+                     ELSE BEGIN SET loop_start = (header - 1) SET loop_end = header   END
+    FOR (index2 = loop_start ; index2 < loop_end ; ++index2) BEGIN // looks through headers
+      READ_BYTE (abil_off +        (index2 * header_length)) abil_type
+      PATCH_IF ((abil_type = header_type) OR (header_type < 0)) BEGIN
+        READ_SHORT (abil_off + 0x1e + (index2 * header_length)) abil_fx_num
+        READ_SHORT (abil_off + 0x20 + (index2 * header_length)) abil_fx_idx
+        FOR (index = 0 ; index < abil_fx_num ; index = index + 1) BEGIN
+          READ_SHORT (fx_off +        ((abil_fx_idx + index) * 0x30)) opcode_file
+          PATCH_IF ((match_opcode = opcode_file) OR (match_opcode < 0)) BEGIN
+            PATCH_IF (new_opcode >= 0)    BEGIN WRITE_SHORT (fx_off +        ((index + abil_fx_idx) * 0x30)) new_opcode    END
+            PATCH_IF (target >= 0)        BEGIN WRITE_BYTE  (fx_off + 0x02 + ((index + abil_fx_idx) * 0x30)) target        END
+            PATCH_IF (power >= 0)         BEGIN WRITE_BYTE  (fx_off + 0x03 + ((index + abil_fx_idx) * 0x30)) power         END
+            PATCH_IF (parameter1 >= 0)    BEGIN WRITE_LONG  (fx_off + 0x04 + ((index + abil_fx_idx) * 0x30)) parameter1    END
+            PATCH_IF (parameter2 >= 0)    BEGIN WRITE_LONG  (fx_off + 0x08 + ((index + abil_fx_idx) * 0x30)) parameter2    END
+            PATCH_IF (timing >= 0)        BEGIN WRITE_BYTE  (fx_off + 0x0c + ((index + abil_fx_idx) * 0x30)) timing        END
+            PATCH_IF (resist_dispel >= 0) BEGIN WRITE_BYTE  (fx_off + 0x0d + ((index + abil_fx_idx) * 0x30)) resist_dispel END
+            PATCH_IF (duration >= 0)      BEGIN WRITE_LONG  (fx_off + 0x0e + ((index + abil_fx_idx) * 0x30)) duration      END
+            PATCH_IF (probability1 >= 0)  BEGIN WRITE_BYTE  (fx_off + 0x12 + ((index + abil_fx_idx) * 0x30)) probability1  END
+            PATCH_IF (probability2 >= 0)  BEGIN WRITE_BYTE  (fx_off + 0x13 + ((index + abil_fx_idx) * 0x30)) probability2  END
+            PATCH_IF (dicenumber >= 0)    BEGIN WRITE_LONG  (fx_off + 0x1c + ((index + abil_fx_idx) * 0x30)) dicenumber    END
+            PATCH_IF (dicesize >= 0)      BEGIN WRITE_LONG  (fx_off + 0x20 + ((index + abil_fx_idx) * 0x30)) dicesize      END
+            PATCH_IF (savingthrow >= 0)   BEGIN WRITE_LONG  (fx_off + 0x24 + ((index + abil_fx_idx) * 0x30)) savingthrow   END
+            PATCH_IF (savebonus >= "-10") BEGIN WRITE_LONG  (fx_off + 0x28 + ((index + abil_fx_idx) * 0x30)) savebonus     END
+            PATCH_IF (special >= 0)       BEGIN WRITE_LONG  (fx_off + 0x2c + ((index + abil_fx_idx) * 0x30)) special       END
+            PATCH_IF (duration_high >= 0) BEGIN
+              READ_LONG (fx_off + 0x0e + ((index + abil_fx_idx) * 0x30)) duration_file
+              PATCH_IF (duration_file > 5) BEGIN
+                WRITE_LONG (fx_off + 0x0e + ((index + abil_fx_idx) * 0x30)) duration_high
+              END
+            END
+            PATCH_IF ("%resource%" STRING_COMPARE_CASE "same") BEGIN
+              WRITE_ASCIIE (fx_off + 0x14 + ((index + abil_fx_idx) * 0x30)) "%resource%" #8
+            END
+          END
+        END
+      END
+    END
+  END
+
+END
+
+DEFINE_PATCH_FUNCTION ALTER_ITMSPL_HEADER
+  INT_VAR
+    header_type        = "-1" // -1 is all headers, otherwise use value here
+    match_icon         = 0    // make icon match a qualifier, 0 = no, 1 = yes
+    header             = 0    // 0 matches all headers, otherwise just modify specified header - use with type = -1
+    new_header_type    = "-1" // change the type at 0x00 to this value; negative values mean no change
+    identify           = "-1" // identify to use? at 0x01; negative values mean no change
+    location           = "-1" // ability location at 0x02; negative values mean no change
+    target             = "-1" // target at 0x0c; negative values mean no change
+    target_count       = "-1" // target count at 0x0d; negative values mean no change
+    range              = "-1" // range at 0x0e; negative values mean no change
+    launcher_or_level  = "-1" // launcher (item) or min level (spell) required at 0x10; negative values mean no change
+    speed              = "-1" // speed at 0x12; negative values mean no change
+    thac0_bonus        = "-1" // to-hit bonus at 0x14; negative values mean no change
+    dicesize           = "-1" // dice size at 0x16; negative values mean no change
+    primary_type       = "-1" // primary school at 0x17; negative values mean no change
+    dicenumber         = "-1" // number of dice at 0x18; negative values mean no change
+    secondary_type     = "-1" // seoncdary type at 0x19; negative values mean no change
+    damage_bonus       = "-1" // +damage bonus at 0x1a; negative values mean no change
+    damage_type        = "-1" // damage type at 0x1c; negative values mean no change
+//    effects_num        = "-1" // number of effects at 0x1e; negative values mean no change
+//    effects_index      = "-1" // effects index at 0x20; negative values mean no change
+    charges            = "-1" // number of charges at 0x22; negative values mean no change
+    drained            = "-1" // when drained? at 0x24; negative values mean no change
+    projectile         = "-1" // projectile at 0x2a; negative values mean no change
+    animation_overhand = "-1" // % of overhand attacks at 0x2c; negative values mean no change
+    animation_backhand = "-1" // % of backhand attacks at 0x2e; negative values mean no change
+    animation_thrust   = "-1" // % of thrusting attacks at 0x30; negative values mean no change
+    arrow              = "-1" // is arrow? at 0x32; negative values mean no change
+    bolt               = "-1" // is bolt? at 0x34; negative values mean no change
+    bullet             = "-1" // is bullet? at 0x36; negative values mean no change
+    // flag_ vars affect flags starting at 0x26; 0 means remove flag, 1 means add flag, -1 no change
+    flag_strength      = "-1" // add strength bonus, bit0
+    flag_break         = "-1" // breakable, bit1
+    flag_strength_damage = "-1" // EE, damage strength bonus, bit2
+    flag_strength_thac0 = "-1" // EE, damage strength THAC0, bit3
+    flag_hostile       = "-1" // hostile, bit10
+    flag_recharge      = "-1" // recharge after resting, bit11
+    flag_bypass        = "-1" // bypass armor, bit16
+    flag_keenedge      = "-1" // keen edge, bit17
+    flag_backstab      = "-1" // tobex only, can backstab, bit25
+    flag_noinvisible   = "-1" // tobex only, cannot target invisible, bit26
+
+    header_length = 0x38
+  STR_VAR
+    icon          = "same" // ability icon at 0x04; used to match if type > 4; same means no change otherwise use this value
+BEGIN
+
+  READ_LONG   0x64 "abil_off"
+  READ_SHORT  0x68 "abil_num"
+  PATCH_IF (header = 0) BEGIN SET loop_start = 0            SET loop_end = abil_num END
+                   ELSE BEGIN SET loop_start = (header - 1) SET loop_end = header   END
+  FOR (index = loop_start ; index < loop_end ; ++index) BEGIN
+    READ_BYTE  (abil_off +        (index * header_length)) abil_type
+    READ_ASCII (abil_off + 0x04 + (index * header_length)) icon_file
+    PATCH_IF ((header_type < 0 AND !match_icon) OR (abil_type = header_type) OR ((match_icon = 1) AND ("%icon_file%" STRING_COMPARE_CASE "%icon%" = 0))) BEGIN
+      SET ip = abil_off + (index * header_length)
+      SET pro_off = header_length = 0x38 ? 0x2a : 0x26
+      /* Some of these write lengths do not line up perfectly with the known SPL ability. Some
+       * fields are bytes in the ITM ability but (presumed to be) words in the SPL ability.
+       * However, legal values for the relevant fields never fall outside the byte range, so
+       * we WRITE_BYTE regardless of header type. -Wisp
+       */
+      PATCH_IF (new_header_type >= 0)    BEGIN WRITE_BYTE  (ip)        new_header_type    END
+      PATCH_IF (identify >= 0)           BEGIN WRITE_BYTE  (ip + 0x01) identify           END
+      PATCH_IF (location >= 0)           BEGIN WRITE_BYTE  (ip + 0x02) location           END
+      PATCH_IF (target >= 0)             BEGIN WRITE_BYTE  (ip + 0x0c) target             END
+      PATCH_IF (target_count >= 0)       BEGIN WRITE_BYTE  (ip + 0x0d) target_count       END
+      PATCH_IF (range >= 0)              BEGIN WRITE_SHORT (ip + 0x0e) range              END
+      PATCH_IF (launcher_or_level >= 0)  BEGIN WRITE_BYTE  (ip + 0x10) launcher_or_level  END
+      PATCH_IF (speed >= 0)              BEGIN WRITE_BYTE  (ip + 0x12) speed              END
+      PATCH_IF (thac0_bonus >= 0)        BEGIN WRITE_SHORT (ip + 0x14) thac0_bonus        END
+      PATCH_IF (dicesize >= 0)           BEGIN WRITE_BYTE  (ip + 0x16) dicesize           END
+      PATCH_IF (primary_type >= 0)       BEGIN WRITE_BYTE  (ip + 0x17) primary_type       END
+      PATCH_IF (dicenumber >= 0)         BEGIN WRITE_BYTE  (ip + 0x18) dicenumber         END
+      PATCH_IF (secondary_type >= 0)     BEGIN WRITE_BYTE  (ip + 0x19) secondary_type     END
+      PATCH_IF (damage_bonus >= 0)       BEGIN WRITE_SHORT (ip + 0x1a) damage_bonus       END
+      PATCH_IF (damage_type >= 0)        BEGIN WRITE_SHORT (ip + 0x1c) damage_type        END
+   /* PATCH_IF (effects_num >= 0)        BEGIN WRITE_SHORT (ip + 0x1e) effects_num        END
+      PATCH_IF (effects_index >= 0)      BEGIN WRITE_SHORT (ip + 0x20) effects_index      END */
+      PATCH_IF (charges >= 0)            BEGIN WRITE_SHORT (ip + 0x22) charges            END
+      PATCH_IF (drained >= 0)            BEGIN WRITE_SHORT (ip + 0x24) drained            END
+      PATCH_IF (projectile >= 0)         BEGIN WRITE_SHORT (ip + pro_off) projectile      END
+      PATCH_IF (animation_overhand >= 0) BEGIN WRITE_SHORT (ip + 0x2c) animation_overhand END
+      PATCH_IF (animation_backhand >= 0) BEGIN WRITE_SHORT (ip + 0x2e) animation_backhand END
+      PATCH_IF (animation_thrust >= 0)   BEGIN WRITE_SHORT (ip + 0x30) animation_thrust   END
+      PATCH_IF (arrow >= 0)              BEGIN WRITE_SHORT (ip + 0x32) arrow              END
+      PATCH_IF (bolt >= 0)               BEGIN WRITE_SHORT (ip + 0x34) bolt               END
+      PATCH_IF (bullet >= 0)             BEGIN WRITE_SHORT (ip + 0x36) bullet             END
+      PATCH_IF (flag_strength = 0)       BEGIN WRITE_BYTE  (ip + 0x26) THIS & `BIT0       END
+      PATCH_IF (flag_break = 0)          BEGIN WRITE_BYTE  (ip + 0x26) THIS & `BIT1       END
+      PATCH_IF (flag_strength_damage = 0) BEGIN WRITE_BYTE (ip + 0x26) THIS & `BIT2       END
+      PATCH_IF (flag_strength_thac0 = 0) BEGIN WRITE_BYTE  (ip + 0x26) THIS & `BIT3       END
+      PATCH_IF (flag_hostile = 0)        BEGIN WRITE_BYTE  (ip + 0x27) THIS & `BIT2       END
+      PATCH_IF (flag_recharge = 0)       BEGIN WRITE_BYTE  (ip + 0x27) THIS & `BIT3       END
+      PATCH_IF (flag_bypass = 0)         BEGIN WRITE_BYTE  (ip + 0x28) THIS & `BIT0       END
+      PATCH_IF (flag_keenedge = 0)       BEGIN WRITE_BYTE  (ip + 0x28) THIS & `BIT1       END
+      PATCH_IF (flag_backstab = 0)       BEGIN WRITE_BYTE  (ip + 0x29) THIS & `BIT1       END
+      PATCH_IF (flag_noinvisible = 0)    BEGIN WRITE_BYTE  (ip + 0x29) THIS & `BIT2       END
+      PATCH_IF (flag_strength = 1)       BEGIN WRITE_BYTE  (ip + 0x26) THIS | BIT0        END
+      PATCH_IF (flag_break = 1)          BEGIN WRITE_BYTE  (ip + 0x26) THIS | BIT1        END
+      PATCH_IF (flag_strength_damage = 1) BEGIN WRITE_BYTE (ip + 0x26) THIS | BIT2        END
+      PATCH_IF (flag_strength_thac0 = 1) BEGIN WRITE_BYTE  (ip + 0x26) THIS | BIT3        END
+      PATCH_IF (flag_hostile = 1)        BEGIN WRITE_BYTE  (ip + 0x27) THIS | BIT2        END
+      PATCH_IF (flag_recharge = 1)       BEGIN WRITE_BYTE  (ip + 0x27) THIS | BIT3        END
+      PATCH_IF (flag_bypass = 1)         BEGIN WRITE_BYTE  (ip + 0x28) THIS | BIT0        END
+      PATCH_IF (flag_keenedge = 1)       BEGIN WRITE_BYTE  (ip + 0x28) THIS | BIT1        END
+      PATCH_IF (flag_backstab = 1)       BEGIN WRITE_BYTE  (ip + 0x29) THIS | BIT1        END
+      PATCH_IF (flag_noinvisible = 1)    BEGIN WRITE_BYTE  (ip + 0x29) THIS | BIT2        END
+      PATCH_IF ("%icon%" STRING_COMPARE_CASE "same") BEGIN
+        WRITE_ASCIIE (ip + 0x04) "%icon%" #8
+      END
+    END
+  END
+
+END
+
+DEFINE_PATCH_FUNCTION DELETE_ITMSPL_HEADER
+  INT_VAR header_type = 0    // -1 for all headers, otherwise match type
+          min_level   = "-1" // -1 for all headers, otherwise match
+          header_length = 0x38
+BEGIN
+
+    READ_LONG   0x64 abil_off
+    READ_SHORT  0x68 abil_num
+    READ_LONG   0x6a fx_off
+    READ_SHORT  0x70 fx_num
+    SET fx_delta = 0
+    FOR (index = 0 ; index < abil_num ; ++index) BEGIN // looks for default ability header
+      READ_BYTE   (abil_off +        (index * header_length)) type_file
+      READ_SHORT  (abil_off + 0x10 + (index * header_length)) min_level_file
+      PATCH_IF (((header_type = type_file) OR (header_type < 0)) AND
+                ((min_level = min_level_file) OR (min_level < 0))) BEGIN // default ability check
+        READ_SHORT  (0x1e + abil_off + (index * header_length)) abil_fx_num
+        READ_SHORT  (0x20 + abil_off + (index * header_length)) abil_fx_idx
+        DELETE_BYTES (fx_off + (0x30 * (abil_fx_idx - fx_delta))) (0x30 * abil_fx_num) // deletes all associated effects
+        DELETE_BYTES (abil_off + (index * header_length)) header_length                // deletes ability itself
+        SET fx_delta = (fx_delta + abil_fx_num)
+        SET abil_num = (abil_num - 1)
+        SET index = (index - 1)
+        SET fx_off = (fx_off - header_length)
+      END ELSE BEGIN // if non-matched ability, need to adjust effect indices
+        READ_SHORT  (0x20 + abil_off + (index * header_length)) abil_fx_idx
+        WRITE_SHORT (0x20 + abil_off + (index * header_length)) (abil_fx_idx - fx_delta)
+      END
+    END
+    WRITE_SHORT  0x68 abil_num
+    WRITE_LONG   0x6a fx_off
+
+END
+
+/////                                                  \\\\\
+///// item functions                                   \\\\\
+/////                                                  \\\\\
+
+DEFINE_PATCH_FUNCTION ALTER_ITEM_EFFECT
+  INT_VAR
+    check_globals  = 0      // check global effects: 0 for no, 1 for yes
+    check_headers  = 0      // check effects on headers; 0 for no, 1 for yes
+    header         = 0      // add to this header; 0 for all headers
+    header_type    = "-1"   // -1 to check all headers, otherwise use type specified
+    match_opcode   = "-1"   // opcode at 0x00 to match, use -1 for all
+    new_opcode     = "-1"   // if opcode matches, change to this value
+    target         = "-1"   // change target at 0x02; negative values mean no change
+    timing         = "-1"   // change timing at 0x0c; negative values mean no change
+    power          = "-1"   // change power level at 0x03; negative values mean no change
+    parameter1     = "-1"   // change parameter at 0x04; negative values mean no change
+    parameter2     = "-1"   // change parameter at 0x08; negative values mean no change
+    resist_dispel  = "-1"   // change resist/dispel at 0x0d; negative values mean no change
+    duration       = "-1"   // change duration at 0x0e; negative values mean no change
+    duration_high  = "-1"   // same as duration, but only if existing duration > 5
+    probability1   = "-1"   // change high probability at 0x12; negative values mean no change
+    probability2   = "-1"   // change low probability at 0x13; negative values mean no change
+    dicenumber     = "-1"   // change number of dice at 0x1c; negative values mean no change
+    dicesize       = "-1"   // change size of dice at 0x20; negative values mean no change
+    savingthrow    = "-1"   // changing type of saving throw at 0x24; negative values mean no change
+    savebonus      = "-11"  // change save bonus/penalty; values -11 or lower are ignored
+    special        = "-1"
+  STR_VAR
+    resource       = "same" // resref at 0x14; same means no change, otherwise use this value
+BEGIN
+
+  LPF ALTER_ITMSPL_EFFECT
+    INT_VAR
+      check_globals
+      check_headers
+      header
+      header_type
+      match_opcode
+      new_opcode
+      target
+      timing
+      power
+      parameter1
+      parameter2
+      resist_dispel
+      duration
+      duration_high
+      probability1
+      probability2
+      dicenumber
+      dicesize
+      savingthrow
+      savebonus
+      special
+
+      header_length = 0x38
+    STR_VAR
+      resource
+  END
+
+END
+
+DEFINE_PATCH_FUNCTION ALTER_ITEM_HEADER
+  INT_VAR header_type        = "-1" // -1 is all headers, otherwise use value here
+          match_icon         = 0    // make icon match a qualifier, 0 = no, 1 = yes
+          header             = 0    // 0 matches all headers, otherwise just modify specified header - use with type = -1
+          new_header_type    = "-1" // change the type at 0x00 to this value; negative values mean no change
+          identify           = "-1" // identify to use? at 0x01; negative values mean no change
+          location           = "-1" // ability location at 0x02; negative values mean no change
+          target             = "-1" // target at 0x0c; negative values mean no change
+          target_count       = "-1" // target count at 0x0d; negative values mean no change
+          range              = "-1" // range at 0x0e; negative values mean no change
+          launcher           = "-1" // launcher required at 0x10; negative values mean no change
+          speed              = "-1" // speed at 0x12; negative values mean no change
+          thac0_bonus        = "-1" // to-hit bonus at 0x14; negative values mean no change
+          dicesize           = "-1" // dice size at 0x16; negative values mean no change
+          primary_type       = "-1" // primary school at 0x17; negative values mean no change
+          dicenumber         = "-1" // number of dice at 0x18; negative values mean no change
+          secondary_type     = "-1" // seoncdary type at 0x19; negative values mean no change
+          damage_bonus       = "-1" // +damage bonus at 0x1a; negative values mean no change
+          damage_type        = "-1" // damage type at 0x1c; negative values mean no change
+//          effects_num        = "-1" // number of effects at 0x1e; negative values mean no change
+//          effects_index      = "-1" // effects index at 0x20; negative values mean no change
+          charges            = "-1" // number of charges at 0x22; negative values mean no change
+          drained            = "-1" // when drained? at 0x24; negative values mean no change
+          projectile         = "-1" // projectile at 0x2a; negative values mean no change
+          animation_overhand = "-1" // % of overhand attacks at 0x2c; negative values mean no change
+          animation_backhand = "-1" // % of backhand attacks at 0x2e; negative values mean no change
+          animation_thrust   = "-1" // % of thrusting attacks at 0x30; negative values mean no change
+          arrow              = "-1" // is arrow? at 0x32; negative values mean no change
+          bolt               = "-1" // is bolt? at 0x34; negative values mean no change
+          bullet             = "-1" // is bullet? at 0x36; negative values mean no change
+          // flag_ vars affect flags starting at 0x26; 0 means remove flag, 1 means add flag, -1 no change
+          flag_strength      = "-1" // add strength bonus, bit0
+          flag_break         = "-1" // breakable, bit1
+          flag_strength_damage = "-1" // EE, damage strength bonus, bit2
+          flag_strength_thac0 = "-1" // EE, damage strength THAC0, bit3
+          flag_hostile       = "-1" // hostile, bit10
+          flag_recharge      = "-1" // recharge after resting, bit11
+          flag_bypass        = "-1" // bypass armor, bit16
+          flag_keenedge      = "-1" // keen edge, bit17
+          flag_backstab      = "-1" // tobex only, can backstab, bit25
+          flag_noinvisible   = "-1" // tobex only, cannot target invisible, bit26
+  STR_VAR icon               = "same" // ability icon at 0x04; used to match if type > 4; same means no change otherwise use this value
+BEGIN
+
+  LPF ALTER_ITMSPL_HEADER
+    INT_VAR
+      header_type
+      match_icon
+      header
+      new_header_type
+      identify
+      location
+      target
+      target_count
+      range
+      launcher_or_level = launcher
+      speed
+      thac0_bonus
+      dicesize
+      primary_type
+      dicenumber
+      secondary_type
+      damage_bonus
+      damage_type
+      charges
+      drained
+      projectile
+      animation_overhand
+      animation_backhand
+      animation_thrust
+      arrow
+      bolt
+      bullet
+      flag_strength
+      flag_break
+      flag_strength_damage
+      flag_strength_thac0
+      flag_hostile
+      flag_recharge
+      flag_bypass
+      flag_keenedge
+      flag_backstab
+      flag_noinvisible
+
+      header_length = 0x38
+    STR_VAR
+      icon
+  END
+
+END
+
+DEFINE_PATCH_FUNCTION DELETE_ITEM_HEADER
+  INT_VAR header_type = 0 // -1 for all headers, otherwise match type
+BEGIN
+
+  LPF DELETE_ITMSPL_HEADER
+    INT_VAR
+      header_type
+      header_length = 0x38
+  END
+
+END
+
+/////                                                  \\\\\
+///// spell functions                                  \\\\\
+/////                                                  \\\\\
+
+DEFINE_PATCH_FUNCTION ALTER_SPELL_EFFECT
+  INT_VAR
+    check_globals  = 0      // check global effects: 0 for no, 1 for yes
+    check_headers  = 1      // check effects on headers; 0 for no, 1 for yes
+    header         = 0      // add to this header; 0 for all headers
+    header_type    = "-1"   // -1 to check all headers, otherwise use type specified
+    match_opcode   = "-1"   // opcode at 0x00 to match, use -1 for all
+    new_opcode     = "-1"   // if opcode matches, change to this value
+    target         = "-1"   // change target at 0x02; negative values mean no change
+    timing         = "-1"   // change timing at 0x0c; negative values mean no change
+    power          = "-1"   // change power level at 0x03; negative values mean no change
+    parameter1     = "-1"   // change parameter at 0x04; negative values mean no change
+    parameter2     = "-1"   // change parameter at 0x08; negative values mean no change
+    resist_dispel  = "-1"   // change resist/dispel at 0x0d; negative values mean no change
+    duration       = "-1"   // change duration at 0x0e; negative values mean no change
+    duration_high  = "-1"   // same as duration, but only if existing duration > 5
+    probability1   = "-1"   // change high probability at 0x12; negative values mean no change
+    probability2   = "-1"   // change low probability at 0x13; negative values mean no change
+    dicenumber     = "-1"   // change number of dice at 0x1c; negative values mean no change
+    dicesize       = "-1"   // change size of dice at 0x20; negative values mean no change
+    savingthrow    = "-1"   // changing type of saving throw at 0x24; negative values mean no change
+    savebonus      = "-11"  // change save bonus/penalty; values -11 or lower are ignored
+    special        = "-1"   // change special; negative values mean no change
+  STR_VAR
+    resource       = "same" // resref at 0x14; same means no change, otherwise use this value
+BEGIN
+  LPF ALTER_ITMSPL_EFFECT
+    INT_VAR
+      check_globals
+      check_headers
+      header
+      header_type
+      match_opcode
+      new_opcode
+      target
+      timing
+      power
+      parameter1
+      parameter2
+      resist_dispel
+      duration
+      duration_high
+      probability1
+      probability2
+      dicenumber
+      dicesize
+      savingthrow
+      savebonus
+      special
+
+      header_length = 0x28
+    STR_VAR
+      resource
+  END
+
+END
+
+DEFINE_PATCH_FUNCTION ALTER_SPELL_HEADER
+  INT_VAR header_type     = "-1" // -1 is all headers, otherwise use value here
+          match_icon      = 0    // make icon match a qualifier, 0 = no, 1 = yes
+          header          = 0    // 0 matches all headers, otherwise just modify specified header - use with type = -1
+          new_header_type = "-1" // change the type at 0x00 to this value; negative values mean no change
+          location        = "-1" // ability location at 0x02; negative values mean no change
+          target          = "-1" // target at 0x0c; negative values mean no change
+          target_count    = "-1" // target count at 0x0d; negative values mean no change
+          range           = "-1" // range at 0x0e; negative values mean no change
+          min_level       = "-1" // minimum level at 0x10; negative values mean no change
+          speed           = "-1" // speed at 0x12; negative values mean no change
+          thac0_bonus     = "-1" // to-hit bonus at 0x14; negative values mean no change
+          dicesize        = "-1" // dice size at 0x16; negative values mean no change
+          dicenumber      = "-1" // number of dice at 0x18; negative values mean no change
+          damage_bonus    = "-1" // +damage bonus at 0x1a; negative values mean no change
+          damage_type     = "-1" // damage type at 0x1c; negative values mean no change
+//          effects_num     = "-1" // number of effects at 0x1e; negative values mean no change
+//          effects_index   = "-1" // effects index at 0x20; negative values mean no change
+          charges         = "-1" // number of charges at 0x22; negative values mean no change
+          projectile      = "-1" // projectile at 0x26; negative values mean no change
+  STR_VAR icon            = "same" // ability icon at 0x04; used to match if type > 4; same means no change otherwise use this value
+BEGIN
+
+  LPF ALTER_ITMSPL_HEADER
+    INT_VAR
+      header_type
+      match_icon
+      header
+      new_header_type
+      location
+      target
+      target_count
+      range
+      launcher_or_level = min_level
+      speed
+      thac0_bonus
+      dicesize
+      dicenumber
+      damage_bonus
+      damage_type
+      charges
+      projectile
+
+      header_length = 0x28
+    STR_VAR
+      icon
+  END
+
+END
+
+DEFINE_PATCH_FUNCTION DELETE_SPELL_HEADER
+  INT_VAR header_type = 0    // -1 for all headers, otherwise match type
+          min_level   = "-1" // -1 for all headers, otherwise match
+BEGIN
+
+  LPF DELETE_ITMSPL_HEADER
+    INT_VAR
+      header_type
+      min_level
+      header_length = 0x28
+  END
+
+END
+
+DEFINE_PATCH_FUNCTION CLONE_EFFECT
+
+  // defines what we're going to check
+  INT_VAR check_globals       = 1
+          check_headers       = 1
+          header              = "-1"
+          header_type         = "-1"
+          multi_match         = 999
+          verbose             = 0
+          silent              = 0
+
+  // variables for finding the effect to match
+          match_opcode        = "-1"
+          match_target        = "-1"
+          match_power         = "-1"
+          match_parameter1    = "-1"
+          match_parameter2    = "-1"
+          match_timing        = "-1"
+          match_resist_dispel = "-1"
+          match_duration      = "-1"
+          match_duration_high = "-1"
+          match_probability1  = "-1"
+          match_probability2  = "-1"
+          match_dicenumber    = "-1"
+          match_dicesize      = "-1"
+          match_savingthrow   = "-1"
+          match_savebonus     = "-11"
+          match_special       = "-1"
+
+  // variables for the new effect
+          opcode              = "-1"
+          target              = "-1"
+          power               = "-1"
+          parameter1          = "-1"
+          parameter2          = "-1"
+          timing              = "-1"
+          resist_dispel       = "-1"
+          duration            = "-1"
+          duration_high       = "-1"
+          probability1        = "-1"
+          probability2        = "-1"
+          dicenumber          = "-1"
+          dicesize            = "-1"
+          savingthrow         = "-1"
+          savebonus           = "-11"
+          special             = "-1"
+
+  // same for match and new STR_VAR
+  STR_VAR match_resource      = "SAME"
+          resource            = "SAME"
+          insert              = "above"
+
+BEGIN
+  PATCH_IF ("%version%" STRING_COMPARE_CASE "V9.1" = 0) BEGIN // iwd2, are v9.1
+    READ_LONG  0x78 ent_off
+    READ_LONG  0x7c ent_num
+  END ELSE BEGIN
+    READ_LONG  0x68 ent_off
+    READ_LONG  0x6c ent_num
+  END
+
+  // set variables and offsets based on the file type
+  SET new_fx = 0
+  READ_ASCII 0 sig ELSE "fail" (4)
+  READ_ASCII 0x04 version (4)
+  PATCH_MATCH "%sig%" WITH
+    "SPL "
+    BEGIN
+      PATCH_IF ("%version%" STRING_COMPARE_CASE "V2.0" = 0) BEGIN // iwd2, spl 2.0
+        SET min_size       = 0x82
+      END ELSE BEGIN
+        SET min_size       = 0x72
+      END
+      READ_LONG   0x6a fx_off   ELSE 0
+      SET counter_offset = 0x70
+      SET abil_length    = 0x28
+      SET fx_type        = 0
+      READ_LONG   0x64 abil_off ELSE 0
+      READ_SHORT  0x68 abil_num ELSE 0
+    END
+
+    "ITM "
+    BEGIN
+      PATCH_IF ("%version%" STRING_COMPARE_CASE "V1.1" = 0) BEGIN // pst, itm v1.1
+        SET min_size       = 0x9a
+      END ELSE BEGIN
+        SET min_size       = 0x72
+      END
+      READ_LONG   0x6a fx_off   ELSE 0
+      SET counter_offset = 0x70
+      SET abil_length    = 0x38
+      SET fx_type        = 0
+      READ_LONG   0x64 abil_off ELSE 0
+      READ_SHORT  0x68 abil_num ELSE 0
+    END
+
+    "CRE "
+    BEGIN
+      PATCH_IF ("%version%" STRING_COMPARE_CASE "V1.2" = 0) BEGIN // pst, cre v1.2
+        SET min_size       = 0x378
+        READ_LONG  0x368 fx_off
+        SET counter_offset = 0x36c
+      END ELSE
+      PATCH_IF ("%version%" STRING_COMPARE_CASE "V2.2" = 0) BEGIN // iwd2, cre v2.2
+        SET min_size       = 0x62e
+        READ_LONG  0x61e fx_off
+        SET counter_offset = 0x622
+      END ELSE
+      PATCH_IF ("%version%" STRING_COMPARE_CASE "V9.0" = 0) BEGIN // iwd, cre v9.0
+        SET min_size       = 0x33c
+        READ_LONG  0x32c fx_off
+        SET counter_offset = 0x330
+      END ELSE BEGIN                                               // everything else, cre v1.0
+        SET min_size = 0x2d4
+        READ_LONG  0x2c4 fx_off
+        SET counter_offset = 0x2c8
+      END
+      SET abil_off = 0 // basically prevents the ability effect loop
+      SET abil_num = 0
+      SET abil_length = 0
+      SET check_globals = 1
+      READ_BYTE 0x33 fx_type ELSE 2
+    END
+
+    "fail"
+    BEGIN
+      PATCH_FAIL "ERROR: CLONE_EFFECT does not think %SOURCE_FILE% appears to be a valid file"
+    END
+
+    DEFAULT
+      SET min_size = "-1" // kill macro as the file type is not recognized
+      PATCH_FAIL "ERROR: CLONE_EFFECT does not support file type %sig%"
+  END
+
+  PATCH_IF (BUFFER_LENGTH >= min_size) BEGIN // sanity check
+    FOR (index = (0 - check_globals) ; index < abil_num ; ++index) BEGIN // we start at -1 for global effects
+      PATCH_IF (index < 0) BEGIN // if loop through globals needed
+        SET abil_fx_idx = 0  // start with effect 0 since we're in the global loop
+        SET abil_type = "-1" // basically, ignore header type checks for global loop
+      END ELSE BEGIN // otherwise normal ability
+        READ_BYTE   (abil_off +        (abil_length * index)) abil_type
+        SET counter_offset = (abil_off + 0x1e + (abil_length * index))
+        WRITE_SHORT (abil_off + 0x20 + (abil_length * index)) (THIS + new_fx) // update index with previously added effects
+        READ_SHORT  (abil_off + 0x20 + (abil_length * index)) abil_fx_idx
+      END
+      READ_SHORT counter_offset counter // fx_num on global loop, otherwise abil_fx_num
+      PATCH_IF (((abil_type = header_type) OR (abil_type < 0) OR (header_type < 0)) AND // only look on the right header types, if specified...
+                ((header = index) OR (header < 0)) AND                                  // and only on the right # header, if specified
+                ((index < 0) OR (check_headers))) BEGIN                                 // if check headers = 0, only re-index
+        SET last = 0                              // and only on the right # header, if specified
+        SET local_multi = multi_match
+        FOR (index2 = 0 ; index2 < (counter - last) ; ++index2) BEGIN
+
+          // read the variables from the current effect
+          READ_SHORT (fx_off        + (0x08 * fx_type) + ((abil_fx_idx + index2) * (0x30 + (0xd8 * fx_type)))) o_opcode
+          READ_BYTE  (fx_off + 0x02 + (0x0a * fx_type) + ((abil_fx_idx + index2) * (0x30 + (0xd8 * fx_type)))) o_target
+          READ_BYTE  (fx_off + 0x03 + (0x0d * fx_type) + ((abil_fx_idx + index2) * (0x30 + (0xd8 * fx_type)))) o_power
+          READ_LONG  (fx_off + 0x04 + (0x10 * fx_type) + ((abil_fx_idx + index2) * (0x30 + (0xd8 * fx_type)))) o_parameter1
+          READ_LONG  (fx_off + 0x08 + (0x10 * fx_type) + ((abil_fx_idx + index2) * (0x30 + (0xd8 * fx_type)))) o_parameter2
+          READ_BYTE  (fx_off + 0x0c + (0x10 * fx_type) + ((abil_fx_idx + index2) * (0x30 + (0xd8 * fx_type)))) o_timing
+          READ_BYTE  (fx_off + 0x0d + (0x47 * fx_type) + ((abil_fx_idx + index2) * (0x30 + (0xd8 * fx_type)))) o_resist_dispel
+          READ_LONG  (fx_off + 0x0e + (0x12 * fx_type) + ((abil_fx_idx + index2) * (0x30 + (0xd8 * fx_type)))) o_duration
+          READ_BYTE  (fx_off + 0x12 + (0x12 * fx_type) + ((abil_fx_idx + index2) * (0x30 + (0xd8 * fx_type)))) o_probability1
+          READ_BYTE  (fx_off + 0x13 + (0x13 * fx_type) + ((abil_fx_idx + index2) * (0x30 + (0xd8 * fx_type)))) o_probability2
+          READ_ASCII (fx_off + 0x14 + (0x14 * fx_type) + ((abil_fx_idx + index2) * (0x30 + (0xd8 * fx_type)))) o_resource
+          READ_LONG  (fx_off + 0x1c + (0x14 * fx_type) + ((abil_fx_idx + index2) * (0x30 + (0xd8 * fx_type)))) o_dicenumber
+          READ_LONG  (fx_off + 0x20 + (0x14 * fx_type) + ((abil_fx_idx + index2) * (0x30 + (0xd8 * fx_type)))) o_dicesize
+          READ_LONG  (fx_off + 0x24 + (0x14 * fx_type) + ((abil_fx_idx + index2) * (0x30 + (0xd8 * fx_type)))) o_savingthrow
+          READ_LONG  (fx_off + 0x28 + (0x14 * fx_type) + ((abil_fx_idx + index2) * (0x30 + (0xd8 * fx_type)))) o_savebonus
+          READ_LONG  (fx_off + 0x2c + (0x14 * fx_type) + ((abil_fx_idx + index2) * (0x30 + (0xd8 * fx_type)))) o_special
+
+          // match ALL these variables, if specified
+          PATCH_IF (((match_opcode        = o_opcode)        OR (match_opcode < 0))        AND
+                    ((match_target        = o_target)        OR (match_target < 0))        AND
+                    ((match_power         = o_power)         OR (match_power < 0))         AND
+                    ((match_parameter1    = o_parameter1)    OR (match_parameter1 < 0))    AND
+                    ((match_parameter2    = o_parameter2)    OR (match_parameter2 < 0))    AND
+                    ((match_timing        = o_timing)        OR (match_timing < 0))        AND
+                    ((match_resist_dispel = o_resist_dispel) OR (match_resist_dispel < 0)) AND
+                    ((match_duration      = o_duration)      OR (match_duration < 0))      AND
+                    ((match_probability1  = o_probability1)  OR (match_probability1 < 0))  AND
+                    ((match_probability2  = o_probability2)  OR (match_probability2 < 0))  AND
+                    ((match_dicenumber    = o_dicenumber)    OR (match_dicenumber < 0))    AND
+                    ((match_dicesize      = o_dicesize)      OR (match_dicesize < 0))      AND
+                    ((match_savingthrow   = o_savingthrow)   OR (match_savingthrow < 0))   AND
+                    ((match_savebonus     = o_savebonus)     OR (match_savebonus < "-10")) AND
+                    ((match_special       = o_special)       OR (match_special < 0))       AND
+                    (("%match_resource%" STRING_COMPARE_CASE "%o_resource%" = 0) OR ("%match_resource%" STRING_COMPARE_CASE "SAME" = 0)))
+          BEGIN
+
+            // now that we've got a match, read-and-clone it:
+            READ_ASCII   (fx_off        + ((abil_fx_idx + index2) * (0x30 + (0xd8 * fx_type)))) clone (0x30 + (0xd8 * fx_type))
+            PATCH_IF ("%insert%" STRING_COMPARE_CASE "below" = 0) BEGIN
+              SET base = (fx_off        + ((abil_fx_idx + index2 + 1) * (0x30 + (0xd8 * fx_type))))
+            END ELSE
+            PATCH_IF ("%insert%" STRING_COMPARE_CASE "first" = 0) BEGIN
+              SET base = (fx_off        + (abil_fx_idx * (0x30 + (0xd8 * fx_type))))
+            END ELSE
+            PATCH_IF ("%insert%" STRING_COMPARE_CASE "last" = 0) BEGIN
+              SET base = (fx_off        + ((abil_fx_idx + counter) * (0x30 + (0xd8 * fx_type))))
+            END ELSE BEGIN
+              SET base = (fx_off        + ((abil_fx_idx + index2) * (0x30 + (0xd8 * fx_type))))
+            END
+            INSERT_BYTES base (0x30 + (0xd8 * fx_type))
+            WRITE_ASCIIE base "%clone%"
+
+            // overwrite the cloned effect with the new variables, if specified
+            PATCH_IF (opcode >= 0)        BEGIN WRITE_SHORT (base        + (0x08 * fx_type)) opcode        END
+            PATCH_IF (target >= 0)        BEGIN WRITE_BYTE  (base + 0x02 + (0x0a * fx_type)) target        END
+            PATCH_IF (power >= 0)         BEGIN WRITE_BYTE  (base + 0x03 + (0x0d * fx_type)) power         END
+            PATCH_IF (parameter1 >= 0)    BEGIN WRITE_LONG  (base + 0x04 + (0x10 * fx_type)) parameter1    END
+            PATCH_IF (parameter2 >= 0)    BEGIN WRITE_LONG  (base + 0x08 + (0x10 * fx_type)) parameter2    END
+            PATCH_IF (timing >= 0)        BEGIN WRITE_BYTE  (base + 0x0c + (0x10 * fx_type)) timing        END
+            PATCH_IF (resist_dispel >= 0) BEGIN WRITE_BYTE  (base + 0x0d + (0x47 * fx_type)) resist_dispel END
+            PATCH_IF (duration >= 0)      BEGIN WRITE_LONG  (base + 0x0e + (0x12 * fx_type)) duration      END
+            PATCH_IF (probability1 >= 0)  BEGIN WRITE_BYTE  (base + 0x12 + (0x12 * fx_type)) probability1  END
+            PATCH_IF (probability2 >= 0)  BEGIN WRITE_BYTE  (base + 0x13 + (0x13 * fx_type)) probability2  END
+            PATCH_IF (dicenumber >= 0)    BEGIN WRITE_LONG  (base + 0x1c + (0x14 * fx_type)) dicenumber    END
+            PATCH_IF (dicesize >= 0)      BEGIN WRITE_LONG  (base + 0x20 + (0x14 * fx_type)) dicesize      END
+            PATCH_IF (savingthrow >= 0)   BEGIN WRITE_LONG  (base + 0x24 + (0x14 * fx_type)) savingthrow   END
+            PATCH_IF (savebonus >= "-10") BEGIN WRITE_LONG  (base + 0x28 + (0x14 * fx_type)) savebonus     END
+            PATCH_IF (special >= 0)       BEGIN WRITE_LONG  (base + 0x2c + (0x14 * fx_type)) special       END
+            PATCH_IF ("%resource%" STRING_COMPARE_CASE "SAME" != 0) BEGIN
+              WRITE_ASCIIE (base + 0x14 + (0x14 * fx_type)) "%resource%" #8
+            END
+
+            // update the tracking vars
+            SET new_fx += 1
+            SET counter += 1
+            PATCH_IF (local_multi < 2) BEGIN  // kill loop if we only want one match
+              SET index2 = counter
+            END ELSE BEGIN // otherwise bump vars and keep going
+              SET local_multi  -= 1
+              PATCH_IF ("%insert%" STRING_COMPARE_CASE "last" = 0) BEGIN
+                SET last += 1
+              END ELSE BEGIN
+                SET index2 += 1
+              END
+            END
+
+          END // end patch_if for a matched effect
+        END // end of the for loop through effects
+      END // end patch_if for matched/specified headers
+      WRITE_SHORT counter_offset counter // fx_num on global loop, otherwise abil_fx_num
+    END // end loop through effects on ability
+  END // end ability loop
+
+  // now adjust offsets for creature files
+  PATCH_IF (("%sig%" STRING_EQUAL "CRE ") AND (new_fx > 0)) BEGIN // fix offsets for cre files if fx inserted
+    SET inserted = ((0x30 + (0xd8 * fx_type)) * new_fx)
+    PATCH_IF ("%version%" STRING_COMPARE_CASE "V1.2" = 0) BEGIN // pst, cre v1.2
+      PATCH_FOR_EACH offset IN 0x294 0x344 0x34c 0x354 0x35c 0x360 BEGIN
+        READ_LONG offset off
+        PATCH_IF (fx_off < off) BEGIN
+          WRITE_LONG offset (off + inserted)
+        END
+      END
+    END ELSE
+    PATCH_IF ("%version%" STRING_COMPARE_CASE "V2.2" = 0) BEGIN // iwd2, cre v2.2
+      PATCH_FOR_EACH offset IN 0x5fa 0x602 0x60a 0x612 0x616 BEGIN
+        READ_LONG offset off
+        PATCH_IF (fx_off < off) BEGIN
+          WRITE_LONG offset (off + inserted)
+        END
+      END
+      FOR (offset = 0x3ba ; offset < 0x4b3 ; offset = offset + 0x04) BEGIN // all of the spell offsets
+        READ_LONG offset off
+        PATCH_IF (fx_off < off) BEGIN
+          WRITE_LONG offset (off + inserted)
+        END
+      END
+      FOR (offset = 0x5b2 ; offset < 0x5d3 ; offset = offset + 0x04) BEGIN // domain spell offsets
+        READ_LONG offset off
+        PATCH_IF (fx_off < off) BEGIN
+          WRITE_LONG offset (off + inserted)
+        END
+      END
+    END ELSE
+    PATCH_IF ("%version%" STRING_COMPARE_CASE "V9.0" = 0) BEGIN // iwd, cre v9.0
+      PATCH_FOR_EACH offset IN 0x308 0x310 0x318 0x320 0x324 BEGIN
+        READ_LONG offset off
+        PATCH_IF (fx_off < off) BEGIN
+          WRITE_LONG offset (off + inserted)
+        END
+      END
+    END ELSE BEGIN                                               // everything else, cre v1.0
+      PATCH_FOR_EACH offset IN 0x2a0 0x2a8 0x2b0 0x2b8 0x2bc BEGIN
+        READ_LONG offset off
+        PATCH_IF (fx_off < off) BEGIN
+          WRITE_LONG offset (off + inserted)
+        END
+      END
+    END
+  END
+
+  PATCH_IF (new_fx = 0 && !silent) BEGIN
+    PATCH_WARN "WARNING: no effects added to %SOURCE_FILE%"
+  END ELSE PATCH_IF (verbose && !silent) BEGIN
+    READ_LONG 0x0c strref
+    PATCH_IF ((strref > 0) AND (strref < 200000)) BEGIN
+      READ_STRREF 0x0c name
+    END ELSE BEGIN
+      READ_STRREF 0x08 name
+    END
+    PATCH_PRINT "              ~%SOURCE_FILE%~   ~override~ // %name%, %new_fx% effect(s) added"
+  END
+
+END
+
+DEFINE_PATCH_FUNCTION DELETE_EFFECT
+
+  // defines what we're going to check
+  INT_VAR check_globals       = 1
+          check_headers       = 1
+          header              = "-1"
+          header_type         = "-1"
+          multi_match         = 999
+          verbose             = 0
+
+  // variables for finding the effect to match
+          match_opcode        = "-1"
+          match_target        = "-1"
+          match_power         = "-1"
+          match_parameter1    = "-1"
+          match_parameter2    = "-1"
+          match_timing        = "-1"
+          match_resist_dispel = "-1"
+          match_duration      = "-1"
+          match_duration_high = "-1"
+          match_probability1  = "-1"
+          match_probability2  = "-1"
+          match_dicenumber    = "-1"
+          match_dicesize      = "-1"
+          match_savingthrow   = "-1"
+          match_savebonus     = "-11"
+          match_special       = "-1"
+
+  // same for match and new STR_VAR
+  STR_VAR match_resource      = "SAME"
+
+BEGIN
+
+  // set variables and offsets based on the file type
+  SET new_fx = 0
+  READ_ASCII 0 sig ELSE "fail" (4)
+  READ_ASCII 0x04 version (4)
+  PATCH_MATCH "%sig%" WITH
+    "SPL "
+    BEGIN
+      PATCH_IF ("%version%" STRING_COMPARE_CASE "V2.0" = 0) BEGIN // iwd2, spl 2.0
+        SET min_size       = 0x82
+      END ELSE BEGIN
+        SET min_size       = 0x72
+      END
+      READ_LONG   0x6a fx_off   ELSE 0
+      SET counter_offset = 0x70
+      SET abil_length    = 0x28
+      SET fx_type        = 0
+      READ_LONG   0x64 abil_off ELSE 0
+      READ_SHORT  0x68 abil_num ELSE 0
+    END
+
+    "ITM "
+    BEGIN
+      PATCH_IF ("%version%" STRING_COMPARE_CASE "V1.1" = 0) BEGIN // pst, itm v1.1
+        SET min_size       = 0x9a
+      END ELSE BEGIN
+        SET min_size       = 0x72
+      END
+      READ_LONG   0x6a fx_off   ELSE 0
+      SET counter_offset = 0x70
+      SET abil_length    = 0x38
+      SET fx_type        = 0
+      READ_LONG   0x64 abil_off ELSE 0
+      READ_SHORT  0x68 abil_num ELSE 0
+    END
+
+    "CRE "
+    BEGIN
+      PATCH_IF ("%version%" STRING_COMPARE_CASE "V1.2" = 0) BEGIN // pst, cre v1.2
+        SET min_size       = 0x378
+        READ_LONG  0x368 fx_off
+        SET counter_offset = 0x36c
+      END ELSE
+      PATCH_IF ("%version%" STRING_COMPARE_CASE "V2.2" = 0) BEGIN // iwd2, cre v2.2
+        SET min_size       = 0x62e
+        READ_LONG  0x61e fx_off
+        SET counter_offset = 0x622
+      END ELSE
+      PATCH_IF ("%version%" STRING_COMPARE_CASE "V9.0" = 0) BEGIN // iwd, cre v9.0
+        SET min_size       = 0x33c
+        READ_LONG  0x32c fx_off
+        SET counter_offset = 0x330
+      END ELSE BEGIN                                               // everything else, cre v1.0
+        SET min_size = 0x2d4
+        READ_LONG  0x2c4 fx_off
+        SET counter_offset = 0x2c8
+      END
+      SET abil_off = 0 // basically prevents the ability effect loop
+      SET abil_num = 0
+      SET abil_length = 0
+      SET check_globals = 1
+      READ_BYTE 0x33 fx_type ELSE 2
+    END
+
+    "fail"
+    BEGIN
+      PATCH_WARN "WARNING: DELETE_EFFECT does not think %SOURCE_FILE% appears to be a valid file"
+    END
+
+    DEFAULT
+      SET min_size = "-1" // kill macro as the file type is not recognized
+      PATCH_WARN "WARNING: DELETE_EFFECT does not support file type %sig%"
+  END
+
+  PATCH_IF (BUFFER_LENGTH >= min_size) BEGIN // sanity check
+    FOR (index = (0 - check_globals) ; index < abil_num ; ++index) BEGIN // we start at -1 for global effects
+      PATCH_IF (index < 0) BEGIN // if loop through globals needed
+        SET abil_fx_idx = 0  // start with effect 0 since we're in the global loop
+        SET abil_type = "-1" // basically, ignore header type checks for global loop
+      END ELSE BEGIN // otherwise normal ability
+        READ_BYTE   (abil_off +        (abil_length * index)) abil_type
+        SET counter_offset = (abil_off + 0x1e + (abil_length * index))
+        WRITE_SHORT (abil_off + 0x20 + (abil_length * index)) (THIS + new_fx) // update index with previously added effects
+        READ_SHORT  (abil_off + 0x20 + (abil_length * index)) abil_fx_idx
+      END
+      READ_SHORT counter_offset counter // fx_num on global loop, otherwise abil_fx_num
+      PATCH_IF (((abil_type = header_type) OR (abil_type < 0) OR (header_type < 0)) AND // only look on the right header types, if specified...
+                ((header = index) OR (header < 0)) AND                                  // and only on the right # header, if specified
+                ((index < 0) OR (check_headers))) BEGIN                                 // if check headers = 0, only re-index
+        SET local_multi = multi_match
+        FOR (index2 = 0 ; index2 < counter ; ++index2) BEGIN
+
+          // read the variables from the current effect
+          READ_SHORT (fx_off        + (0x08 * fx_type) + ((abil_fx_idx + index2) * (0x30 + (0xd8 * fx_type)))) o_opcode
+          READ_BYTE  (fx_off + 0x02 + (0x0a * fx_type) + ((abil_fx_idx + index2) * (0x30 + (0xd8 * fx_type)))) o_target
+          READ_BYTE  (fx_off + 0x03 + (0x0d * fx_type) + ((abil_fx_idx + index2) * (0x30 + (0xd8 * fx_type)))) o_power
+          READ_LONG  (fx_off + 0x04 + (0x10 * fx_type) + ((abil_fx_idx + index2) * (0x30 + (0xd8 * fx_type)))) o_parameter1
+          READ_LONG  (fx_off + 0x08 + (0x10 * fx_type) + ((abil_fx_idx + index2) * (0x30 + (0xd8 * fx_type)))) o_parameter2
+          READ_BYTE  (fx_off + 0x0c + (0x10 * fx_type) + ((abil_fx_idx + index2) * (0x30 + (0xd8 * fx_type)))) o_timing
+          READ_BYTE  (fx_off + 0x0d + (0x47 * fx_type) + ((abil_fx_idx + index2) * (0x30 + (0xd8 * fx_type)))) o_resist_dispel
+          READ_LONG  (fx_off + 0x0e + (0x12 * fx_type) + ((abil_fx_idx + index2) * (0x30 + (0xd8 * fx_type)))) o_duration
+          READ_BYTE  (fx_off + 0x12 + (0x12 * fx_type) + ((abil_fx_idx + index2) * (0x30 + (0xd8 * fx_type)))) o_probability1
+          READ_BYTE  (fx_off + 0x13 + (0x13 * fx_type) + ((abil_fx_idx + index2) * (0x30 + (0xd8 * fx_type)))) o_probability2
+          READ_ASCII (fx_off + 0x14 + (0x14 * fx_type) + ((abil_fx_idx + index2) * (0x30 + (0xd8 * fx_type)))) o_resource
+          READ_LONG  (fx_off + 0x1c + (0x14 * fx_type) + ((abil_fx_idx + index2) * (0x30 + (0xd8 * fx_type)))) o_dicenumber
+          READ_LONG  (fx_off + 0x20 + (0x14 * fx_type) + ((abil_fx_idx + index2) * (0x30 + (0xd8 * fx_type)))) o_dicesize
+          READ_LONG  (fx_off + 0x24 + (0x14 * fx_type) + ((abil_fx_idx + index2) * (0x30 + (0xd8 * fx_type)))) o_savingthrow
+          READ_LONG  (fx_off + 0x28 + (0x14 * fx_type) + ((abil_fx_idx + index2) * (0x30 + (0xd8 * fx_type)))) o_savebonus
+          READ_LONG  (fx_off + 0x2c + (0x14 * fx_type) + ((abil_fx_idx + index2) * (0x30 + (0xd8 * fx_type)))) o_special
+
+          // match ALL these variables, if specified
+          PATCH_IF (((match_opcode        = o_opcode)        OR (match_opcode < 0))        AND
+                    ((match_target        = o_target)        OR (match_target < 0))        AND
+                    ((match_power         = o_power)         OR (match_power < 0))         AND
+                    ((match_parameter1    = o_parameter1)    OR (match_parameter1 < 0))    AND
+                    ((match_parameter2    = o_parameter2)    OR (match_parameter2 < 0))    AND
+                    ((match_timing        = o_timing)        OR (match_timing < 0))        AND
+                    ((match_resist_dispel = o_resist_dispel) OR (match_resist_dispel < 0)) AND
+                    ((match_duration      = o_duration)      OR (match_duration < 0))      AND
+                    ((match_probability1  = o_probability1)  OR (match_probability1 < 0))  AND
+                    ((match_probability2  = o_probability2)  OR (match_probability2 < 0))  AND
+                    ((match_dicenumber    = o_dicenumber)    OR (match_dicenumber < 0))    AND
+                    ((match_dicesize      = o_dicesize)      OR (match_dicesize < 0))      AND
+                    ((match_savingthrow   = o_savingthrow)   OR (match_savingthrow < 0))   AND
+                    ((match_savebonus     = o_savebonus)     OR (match_savebonus < "-10")) AND
+                    ((match_special       = o_special)       OR (match_special < 0))       AND
+                    (("%match_resource%" STRING_COMPARE_CASE "%o_resource%" = 0) OR ("%match_resource%" STRING_COMPARE_CASE "SAME" = 0))) BEGIN
+
+            // now that we've got a match, read-and-clone it:
+            DELETE_BYTES   (fx_off        + ((abil_fx_idx + index2) * (0x30 + (0xd8 * fx_type)))) (0x30 + (0xd8 * fx_type))
+
+            // update the tracking vars
+            SET new_fx -= 1
+            SET counter -= 1
+            SET index2 -= 1
+            PATCH_IF (local_multi < 2) BEGIN  // kill loop if we only want one match
+              SET index2 = counter
+            END ELSE BEGIN // otherwise bump vars and keep going
+              SET local_multi  -= 1
+            END
+
+          END // end patch_if for a matched effect
+        END // end of the for loop through effects
+      END // end patch_if for matched/specified headers
+      WRITE_SHORT counter_offset counter // fx_num on global loop, otherwise abil_fx_num
+    END // end loop through effects on ability
+  END // end ability loop
+
+  // now adjust offsets for creature files
+  PATCH_IF (("%sig%" STRING_EQUAL "CRE ") AND (new_fx != 0)) BEGIN // fix offsets for cre files if #fx changed
+    SET inserted = ((0x30 + (0xd8 * fx_type)) * new_fx)
+    PATCH_IF ("%version%" STRING_COMPARE_CASE "V1.2" = 0) BEGIN // pst, cre v1.2
+      PATCH_FOR_EACH offset IN 0x294 0x344 0x34c 0x354 0x35c 0x360 BEGIN
+        READ_LONG offset off
+        PATCH_IF (fx_off < off) BEGIN
+          WRITE_LONG offset (off + inserted)
+        END
+      END
+    END ELSE
+    PATCH_IF ("%version%" STRING_COMPARE_CASE "V2.2" = 0) BEGIN // iwd2, cre v2.2
+      PATCH_FOR_EACH offset IN 0x5fa 0x602 0x60a 0x612 0x616 BEGIN
+        READ_LONG offset off
+        PATCH_IF (fx_off < off) BEGIN
+          WRITE_LONG offset (off + inserted)
+        END
+      END
+      FOR (offset = 0x3ba ; offset < 0x4b3 ; offset = offset + 0x04) BEGIN // all of the spell offsets
+        READ_LONG offset off
+        PATCH_IF (fx_off < off) BEGIN
+          WRITE_LONG offset (off + inserted)
+        END
+      END
+      FOR (offset = 0x5b2 ; offset < 0x5d3 ; offset = offset + 0x04) BEGIN // domain spell offsets
+        READ_LONG offset off
+        PATCH_IF (fx_off < off) BEGIN
+          WRITE_LONG offset (off + inserted)
+        END
+      END
+    END ELSE
+    PATCH_IF ("%version%" STRING_COMPARE_CASE "V9.0" = 0) BEGIN // iwd, cre v9.0
+      PATCH_FOR_EACH offset IN 0x308 0x310 0x318 0x320 0x324 BEGIN
+        READ_LONG offset off
+        PATCH_IF (fx_off < off) BEGIN
+          WRITE_LONG offset (off + inserted)
+        END
+      END
+    END ELSE BEGIN                                               // everything else, cre v1.0
+      PATCH_FOR_EACH offset IN 0x2a0 0x2a8 0x2b0 0x2b8 0x2bc BEGIN
+        READ_LONG offset off
+        PATCH_IF (fx_off < off) BEGIN
+          WRITE_LONG offset (off + inserted)
+        END
+      END
+    END
+  END
+
+  PATCH_IF (verbose) BEGIN
+    READ_LONG 0x0c strref
+    PATCH_IF ((strref > 0) AND (strref < 200000)) BEGIN
+      READ_STRREF 0x0c name
+    END ELSE BEGIN
+      READ_STRREF 0x08 name
+    END
+    PATCH_PRINT "              ~%SOURCE_FILE%~   ~override~ // %name%, %new_fx% effect(s) deleted"
+  END
+
+END
+
+DEFINE_PATCH_FUNCTION ALTER_EFFECT
+
+  // defines what we're going to check
+  INT_VAR check_globals       = 1
+          check_headers       = 1
+          header              = "-1"
+          header_type         = "-1"
+          multi_match         = 999
+          verbose             = 0
+          silent              = 0
+
+  // variables for finding the effect to match
+          match_opcode        = "-1"
+          match_target        = "-1"
+          match_power         = "-1"
+          match_parameter1    = "-1"
+          match_parameter2    = "-1"
+          match_timing        = "-1"
+          match_resist_dispel = "-1"
+          match_duration      = "-1"
+          match_duration_high = "-1"
+          match_probability1  = "-1"
+          match_probability2  = "-1"
+          match_dicenumber    = "-1"
+          match_dicesize      = "-1"
+          match_savingthrow   = "-1"
+          match_savebonus     = "-11"
+          match_special       = "-1"
+
+  // variables for the new effect
+          opcode              = "-1"
+          target              = "-1"
+          power               = "-1"
+          parameter1          = "-1"
+          parameter2          = "-1"
+          timing              = "-1"
+          resist_dispel       = "-1"
+          duration            = "-1"
+          duration_high       = "-1"
+          probability1        = "-1"
+          probability2        = "-1"
+          dicenumber          = "-1"
+          dicesize            = "-1"
+          savingthrow         = "-1"
+          savebonus           = "-11"
+          special             = "-1"
+
+  // same for match and new STR_VAR
+  STR_VAR match_resource      = "SAME"
+          resource            = "SAME"
+
+BEGIN  
+
+  // set variables and offsets based on the file type
+  SET alter = 0
+  READ_ASCII 0 sig ELSE "fail" (4)
+  READ_ASCII 0x04 version (4)
+  PATCH_MATCH "%sig%" WITH
+    "SPL "
+    BEGIN
+      PATCH_IF ("%version%" STRING_COMPARE_CASE "V2.0" = 0) BEGIN // iwd2, spl 2.0
+        SET min_size       = 0x82
+      END ELSE BEGIN
+        SET min_size       = 0x72
+      END
+      READ_LONG   0x6a fx_off   ELSE 0
+      SET counter_offset = 0x70
+      SET abil_length    = 0x28
+      SET fx_type        = 0
+      PATCH_IF (check_headers = 0) BEGIN
+        SET abil_num = 0
+      END ELSE BEGIN
+        READ_LONG   0x64 abil_off ELSE 0
+        READ_SHORT  0x68 abil_num ELSE 0
+      END
+    END
+
+    "ITM "
+    BEGIN
+      PATCH_IF ("%version%" STRING_COMPARE_CASE "V1.1" = 0) BEGIN // pst, itm v1.1
+        SET min_size       = 0x9a
+      END ELSE BEGIN
+        SET min_size       = 0x72
+      END
+      READ_LONG   0x6a fx_off   ELSE 0
+      SET counter_offset = 0x70
+      SET abil_length    = 0x38
+      SET fx_type        = 0
+      PATCH_IF (check_headers = 0) BEGIN
+        SET abil_num = 0
+      END ELSE BEGIN
+        READ_LONG   0x64 abil_off ELSE 0
+        READ_SHORT  0x68 abil_num ELSE 0
+      END
+    END
+
+    "CRE "
+    BEGIN
+      PATCH_IF ("%version%" STRING_COMPARE_CASE "V1.2" = 0) BEGIN // pst, cre v1.2
+        SET min_size       = 0x378
+        READ_LONG  0x368 fx_off ELSE 0
+        SET counter_offset = 0x36c
+      END ELSE
+      PATCH_IF ("%version%" STRING_COMPARE_CASE "V2.2" = 0) BEGIN // iwd2, cre v2.2
+        SET min_size       = 0x62e
+        READ_LONG  0x61e fx_off ELSE 0
+        SET counter_offset = 0x622
+      END ELSE
+      PATCH_IF ("%version%" STRING_COMPARE_CASE "V9.0" = 0) BEGIN // iwd, cre v9.0
+        SET min_size       = 0x33c
+        READ_LONG  0x32c fx_off ELSE 0
+        SET counter_offset = 0x330
+      END ELSE BEGIN                                               // everything else, cre v1.0
+        SET min_size = 0x2d4
+        READ_LONG  0x2c4 fx_off ELSE 0
+        SET counter_offset = 0x2c8
+      END
+      SET abil_off = 0 // basically prevents the ability effect loop
+      SET abil_num = 0
+      SET abil_length = 0
+      SET check_globals = 1
+      READ_BYTE 0x33 fx_type ELSE 2
+    END
+
+    "fail"
+    BEGIN
+      PATCH_WARN "WARNING: ALTER_EFFECT does not think %SOURCE_FILE% appears to be a valid file"
+    END
+
+    DEFAULT
+      SET min_size = "-1" // kill macro as the file type is not recognized
+      PATCH_WARN "WARNING: ALTER_EFFECT does not support file type %sig%"
+  END
+
+  PATCH_IF (BUFFER_LENGTH >= min_size) BEGIN // sanity check
+    FOR (index = (0 - check_globals) ; index < abil_num ; ++index) BEGIN // we start at -1 for global effects
+      PATCH_IF (index < 0) BEGIN // if loop through globals needed
+        SET abil_fx_idx = 0  // start with effect 0 since we're in the global loop
+        SET abil_type = "-1" // basically, ignore header type checks for global loop
+      END ELSE BEGIN // otherwise normal ability
+        READ_BYTE   (abil_off +        (abil_length * index)) abil_type
+        SET counter_offset = (abil_off + 0x1e + (abil_length * index))
+        READ_SHORT  (abil_off + 0x20 + (abil_length * index)) abil_fx_idx
+      END
+      READ_SHORT counter_offset counter // fx_num on global loop, otherwise abil_fx_num
+      PATCH_IF (((abil_type = header_type) OR (abil_type < 0) OR (header_type < 0)) AND // only look on the right header types, if specified...
+                ((header = index) OR (header < 0))) BEGIN                               // and only on the right # header, if specified
+        SET local_multi = multi_match
+        FOR (index2 = 0 ; index2 < counter ; ++index2) BEGIN
+
+          // read the variables from the current effect
+          READ_SHORT (fx_off        + (0x08 * fx_type) + ((abil_fx_idx + index2) * (0x30 + (0xd8 * fx_type)))) o_opcode
+          READ_BYTE  (fx_off + 0x02 + (0x0a * fx_type) + ((abil_fx_idx + index2) * (0x30 + (0xd8 * fx_type)))) o_target
+          READ_BYTE  (fx_off + 0x03 + (0x0d * fx_type) + ((abil_fx_idx + index2) * (0x30 + (0xd8 * fx_type)))) o_power
+          READ_LONG  (fx_off + 0x04 + (0x10 * fx_type) + ((abil_fx_idx + index2) * (0x30 + (0xd8 * fx_type)))) o_parameter1
+          READ_LONG  (fx_off + 0x08 + (0x10 * fx_type) + ((abil_fx_idx + index2) * (0x30 + (0xd8 * fx_type)))) o_parameter2
+          READ_BYTE  (fx_off + 0x0c + (0x10 * fx_type) + ((abil_fx_idx + index2) * (0x30 + (0xd8 * fx_type)))) o_timing
+          READ_BYTE  (fx_off + 0x0d + (0x47 * fx_type) + ((abil_fx_idx + index2) * (0x30 + (0xd8 * fx_type)))) o_resist_dispel
+          READ_LONG  (fx_off + 0x0e + (0x12 * fx_type) + ((abil_fx_idx + index2) * (0x30 + (0xd8 * fx_type)))) o_duration
+          READ_BYTE  (fx_off + 0x12 + (0x12 * fx_type) + ((abil_fx_idx + index2) * (0x30 + (0xd8 * fx_type)))) o_probability1
+          READ_BYTE  (fx_off + 0x13 + (0x13 * fx_type) + ((abil_fx_idx + index2) * (0x30 + (0xd8 * fx_type)))) o_probability2
+          READ_ASCII (fx_off + 0x14 + (0x14 * fx_type) + ((abil_fx_idx + index2) * (0x30 + (0xd8 * fx_type)))) o_resource
+          READ_LONG  (fx_off + 0x1c + (0x14 * fx_type) + ((abil_fx_idx + index2) * (0x30 + (0xd8 * fx_type)))) o_dicenumber
+          READ_LONG  (fx_off + 0x20 + (0x14 * fx_type) + ((abil_fx_idx + index2) * (0x30 + (0xd8 * fx_type)))) o_dicesize
+          READ_LONG  (fx_off + 0x24 + (0x14 * fx_type) + ((abil_fx_idx + index2) * (0x30 + (0xd8 * fx_type)))) o_savingthrow
+          READ_LONG  (fx_off + 0x28 + (0x14 * fx_type) + ((abil_fx_idx + index2) * (0x30 + (0xd8 * fx_type)))) o_savebonus
+          READ_LONG  (fx_off + 0x2c + (0x14 * fx_type) + ((abil_fx_idx + index2) * (0x30 + (0xd8 * fx_type)))) o_special
+
+          // match ALL these variables, if specified
+          PATCH_IF (((match_opcode        = o_opcode)        OR (match_opcode < 0))        AND
+                    ((match_target        = o_target)        OR (match_target < 0))        AND
+                    ((match_power         = o_power)         OR (match_power < 0))         AND
+                    ((match_parameter1    = o_parameter1)    OR (match_parameter1 < 0))    AND
+                    ((match_parameter2    = o_parameter2)    OR (match_parameter2 < 0))    AND
+                    ((match_timing        = o_timing)        OR (match_timing < 0))        AND
+                    ((match_resist_dispel = o_resist_dispel) OR (match_resist_dispel < 0)) AND
+                    ((match_duration      = o_duration)      OR (match_duration < 0))      AND
+                    ((match_probability1  = o_probability1)  OR (match_probability1 < 0))  AND
+                    ((match_probability2  = o_probability2)  OR (match_probability2 < 0))  AND
+                    ((match_dicenumber    = o_dicenumber)    OR (match_dicenumber < 0))    AND
+                    ((match_dicesize      = o_dicesize)      OR (match_dicesize < 0))      AND
+                    ((match_savingthrow   = o_savingthrow)   OR (match_savingthrow < 0))   AND
+                    ((match_savebonus     = o_savebonus)     OR (match_savebonus < "-10")) AND
+                    ((match_special       = o_special)       OR (match_special < 0))       AND
+                    (("%match_resource%" STRING_COMPARE_CASE "%o_resource%" = 0) OR ("%match_resource%" STRING_COMPARE_CASE "SAME" = 0))) BEGIN
+
+            // lazily re-use code
+            SET base = (fx_off        + ((abil_fx_idx + index2) * (0x30 + (0xd8 * fx_type))))
+
+            // overwrite the cloned effect with the new variables, if specified
+            PATCH_IF (opcode >= 0)        BEGIN WRITE_SHORT (base        + (0x08 * fx_type)) opcode        END
+            PATCH_IF (target >= 0)        BEGIN WRITE_BYTE  (base + 0x02 + (0x0a * fx_type)) target        END
+            PATCH_IF (power >= 0)         BEGIN WRITE_BYTE  (base + 0x03 + (0x0d * fx_type)) power         END
+            PATCH_IF (parameter1 >= 0)    BEGIN WRITE_LONG  (base + 0x04 + (0x10 * fx_type)) parameter1    END
+            PATCH_IF (parameter2 >= 0)    BEGIN WRITE_LONG  (base + 0x08 + (0x10 * fx_type)) parameter2    END
+            PATCH_IF (timing >= 0)        BEGIN WRITE_BYTE  (base + 0x0c + (0x10 * fx_type)) timing        END
+            PATCH_IF (resist_dispel >= 0) BEGIN WRITE_BYTE  (base + 0x0d + (0x47 * fx_type)) resist_dispel END
+            PATCH_IF (duration >= 0)      BEGIN WRITE_LONG  (base + 0x0e + (0x12 * fx_type)) duration      END
+            PATCH_IF (probability1 >= 0)  BEGIN WRITE_BYTE  (base + 0x12 + (0x12 * fx_type)) probability1  END
+            PATCH_IF (probability2 >= 0)  BEGIN WRITE_BYTE  (base + 0x13 + (0x13 * fx_type)) probability2  END
+            PATCH_IF (dicenumber >= 0)    BEGIN WRITE_LONG  (base + 0x1c + (0x14 * fx_type)) dicenumber    END
+            PATCH_IF (dicesize >= 0)      BEGIN WRITE_LONG  (base + 0x20 + (0x14 * fx_type)) dicesize      END
+            PATCH_IF (savingthrow >= 0)   BEGIN WRITE_LONG  (base + 0x24 + (0x14 * fx_type)) savingthrow   END
+            PATCH_IF (savebonus >= "-10") BEGIN WRITE_LONG  (base + 0x28 + (0x14 * fx_type)) savebonus     END
+            PATCH_IF (special >= 0)       BEGIN WRITE_LONG  (base + 0x2c + (0x14 * fx_type)) special       END
+            PATCH_IF ("%resource%" STRING_COMPARE_CASE "SAME" != 0) BEGIN
+              WRITE_ASCIIE (base + 0x14 + (0x14 * fx_type)) "%resource%" #8
+            END
+
+            // update the tracking vars
+            SET alter += 1
+            PATCH_IF (local_multi < 2) BEGIN  // kill loop if we only want one match
+              SET index2 = counter
+            END ELSE BEGIN // otherwise bump vars and keep going
+              SET local_multi  -= 1
+            END
+
+          END // end patch_if for a matched effect
+        END // end of the for loop through effects
+      END // end patch_if for matched/specified headers
+    END // end loop through effects on ability
+  END // end ability loop
+
+  PATCH_IF (alter = 0 && !silent) BEGIN
+    PATCH_WARN "WARNING: no effects altered on %SOURCE_FILE%"
+  END
+
+  PATCH_IF (verbose && !silent) BEGIN
+    READ_LONG 0x0c strref
+    PATCH_IF ((strref > 0) AND (strref < 200000)) BEGIN
+      READ_STRREF 0x0c name
+    END ELSE BEGIN
+      READ_STRREF 0x08 name
+    END
+    PATCH_PRINT "              ~%SOURCE_FILE%~   ~override~ // %name%, %alter% effect(s) altered"
+  END
+
+END

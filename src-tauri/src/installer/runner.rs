@@ -38,6 +38,149 @@ fn is_prompt_forwarded() -> bool {
         .unwrap_or(false)
 }
 
+/// Per-batch component timing state — used by the stdout reader thread to
+/// attribute WeiDU's SUCCESSFULLY INSTALLED / INSTALLED WITH WARNINGS /
+/// NOT INSTALLED DUE TO ERRORS lines to the component at the matching
+/// index in the batch. Emits `install:component_done` events with
+/// per-component wall-clock durations for the Runner's measurement trace.
+///
+/// Also holds the per-component stdout-observed outcome (`observed`) so
+/// `run_batch` can downgrade individual components from Success to Warning
+/// when WeiDU printed "installed with warnings" for them. Without this,
+/// batches where WeiDU exits 0 but one component warned were reported as
+/// blanket Success — the warning never reached the Issues panel. See
+/// `build_results_from_observed` below.
+struct ComponentTimer {
+    components: Vec<super::Component>,
+    next_idx: usize,
+    last_end: std::time::Instant,
+    /// Parallel to `components`: what WeiDU's stdout reported for each.
+    /// None = no completion line seen (e.g. batch died before this
+    /// component ran). "success" | "warning" | "error" otherwise.
+    observed: Vec<Option<&'static str>>,
+    /// Parallel to `components`: raw `WARNING:` lines observed in WeiDU
+    /// stdout while the component was installing. We push into slot
+    /// `next_idx` — warnings always appear BEFORE the corresponding
+    /// "SUCCESSFULLY INSTALLED" line that advances the index — so the
+    /// lines attributed to component N are the ones WeiDU printed while
+    /// working on N. Capped at MAX_WARN_PER_COMPONENT lines to bound the
+    /// IPC payload on pathological mods that emit thousands of warns.
+    warnings: Vec<Vec<String>>,
+}
+
+/// Hard ceiling on captured warnings per component. A pathological mod can
+/// emit tens of thousands of warn lines (Trap Overhaul's 256-slot IDS loop
+/// was a recent example). Beyond this we keep the first N and add a
+/// "...truncated" marker so the UI knows the list was clipped; dropping
+/// the rest keeps the serialized batch_done payload from ballooning past
+/// a few MB in the megainstall worst case.
+const MAX_WARN_PER_COMPONENT: usize = 50;
+
+/// Classify a WeiDU output line as a component-complete line and return
+/// the normalized status. None means not a component-complete line.
+fn classify_component_line(ll: &str) -> Option<&'static str> {
+    if ll.contains("successfully installed") {
+        Some("success")
+    } else if ll.contains("installed with warnings") {
+        Some("warning")
+    } else if ll.contains("not installed due to") {
+        // "NOT INSTALLED DUE TO ERRORS" - real failure
+        // "NOT INSTALLED DUE TO ACTION_IF" etc. - skipped-by-predicate
+        // Both report the same way; batch_done has the authoritative
+        // classification. For timing purposes the distinction doesn't matter.
+        Some("error")
+    } else {
+        None
+    }
+}
+
+/// Return true if a WeiDU stdout line is a WARNING: diagnostic we want to
+/// capture for later classification. Matches the common WeiDU shapes:
+///   "WARNING: ..."
+///   "WARNING [file.tra]: ..."
+///   "  WARNING: ..." (leading whitespace)
+/// Case-insensitive. Excludes the "installed with warnings" summary line
+/// (that's already captured by `classify_component_line` as a status
+/// indicator, not a diagnostic).
+fn is_warning_line(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    let lo = trimmed.to_ascii_lowercase();
+    // The literal verb "warning" must start a line (after whitespace) and
+    // be followed by a delimiter (:, [, whitespace). Otherwise we'd match
+    // prose like "WARNING enemies spotted" in mod install chatter.
+    if !lo.starts_with("warning") {
+        return false;
+    }
+    let after = &lo[7..]; // everything after "warning"
+    // Require a punctuation or bracket to follow — eliminates false
+    // matches like "warnings produced" in summary lines.
+    let next = after.chars().next();
+    matches!(next, Some(':') | Some(' ') | Some('[') | Some('(') | Some('\t'))
+        && !lo.contains("installed with warnings")
+}
+
+/// Capture a WARNING line against the component currently installing.
+/// Attributes to slot `next_idx` — warnings always precede the
+/// SUCCESSFULLY INSTALLED / INSTALLED WITH WARNINGS line that advances
+/// that index. Caps at MAX_WARN_PER_COMPONENT; beyond that, pushes a
+/// truncation marker once and drops the rest so pathological logs don't
+/// inflate the IPC payload.
+fn capture_warning(timer: &Arc<Mutex<ComponentTimer>>, line: &str) {
+    let Ok(mut t) = timer.lock() else { return };
+    let idx = t.next_idx;
+    if idx >= t.warnings.len() { return; }
+    let list = &mut t.warnings[idx];
+    if list.len() < MAX_WARN_PER_COMPONENT {
+        list.push(line.to_string());
+    } else if list.len() == MAX_WARN_PER_COMPONENT {
+        // Push exactly one truncation marker, then stop accumulating.
+        list.push(format!(
+            "[Infinity Mod Runner] ... truncated: capped at {} warnings per component",
+            MAX_WARN_PER_COMPONENT
+        ));
+    }
+}
+
+/// Emit `install:component_done` for the next component in the batch.
+/// Called from the stdout reader thread each time WeiDU reports a
+/// component outcome. Timing is the elapsed wall-clock since the PREVIOUS
+/// component finished (or since the batch started, for the first one).
+fn emit_component_done(
+    app: &AppHandle,
+    timer: &Arc<Mutex<ComponentTimer>>,
+    status: &str,
+) {
+    let Ok(mut t) = timer.lock() else { return };
+    if t.next_idx >= t.components.len() { return; }
+    let comp = t.components[t.next_idx].clone();
+    let now = std::time::Instant::now();
+    let duration_ms = now.duration_since(t.last_end).as_millis() as u64;
+    t.last_end = now;
+    let idx = t.next_idx;
+    // Record the observed status against the component slot so `run_batch`
+    // can build per-component ComponentResults afterwards. Pin to the enum
+    // of static strings classify_component_line produces so lifetime is
+    // trivially 'static.
+    let observed_static: Option<&'static str> = match status {
+        "success" => Some("success"),
+        "warning" => Some("warning"),
+        "error"   => Some("error"),
+        _ => None,
+    };
+    if idx < t.observed.len() {
+        t.observed[idx] = observed_static;
+    }
+    t.next_idx += 1;
+    drop(t);
+    let _ = app.emit("install:component_done", serde_json::json!({
+        "mod_name": comp.mod_name,
+        "component": comp.component,
+        "component_name": comp.component_name,
+        "duration_ms": duration_ms,
+        "status": status,
+    }));
+}
+
 
 /// Run a single batch — spawns WeiDU, streams I/O, returns results.
 pub fn run_batch(
@@ -89,6 +232,31 @@ pub fn run_batch(
     let readln_fallback = config.readln_fallback.clone();
     let readln_timeout_secs = config.readln_timeout_secs;
 
+    // Per-component timing tracker (Phase 7d, --measure mode always on).
+    //
+    // WeiDU processes components in the `--force-install` order we provide,
+    // emitting one of "SUCCESSFULLY INSTALLED" / "INSTALLED WITH WARNINGS" /
+    // "NOT INSTALLED DUE TO ERRORS" lines per component in that same order.
+    // By matching the Nth match to batch.components[N], we can attribute
+    // wall-clock time to individual components without needing to parse the
+    // component number from WeiDU's text (it varies in format and locale).
+    //
+    // The tracker is shared with the stdout-reading thread via Arc<Mutex<>>.
+    // `batch_done` in orchestrator.rs is still the source of truth for
+    // status; this only provides timing granularity for the trace recorder
+    // on the frontend.
+    let batch_components: Vec<super::Component> = batch.components.clone();
+    let observed_init = vec![None; batch_components.len()];
+    let warnings_init = vec![Vec::new(); batch_components.len()];
+    let component_timer = Arc::new(Mutex::new(ComponentTimer {
+        components: batch_components,
+        next_idx: 0,
+        last_end: std::time::Instant::now(),
+        observed: observed_init,
+        warnings: warnings_init,
+    }));
+    let component_timer_out = component_timer.clone();
+
     // Stream stdout in a thread — handles prompt detection with coordination
     let app_out = app.clone();
     let eet_filled_out = eet_filled.clone();
@@ -138,6 +306,25 @@ pub fn run_batch(
                         }
                     }
 
+                    // Per-component timing emit. Runs independently of bulk
+                    // tracking above — this detects the same lines but is
+                    // concerned with install:component_done events rather
+                    // than bulk-op reset.
+                    {
+                        let ll_comp = line.to_lowercase();
+                        if let Some(status) = classify_component_line(&ll_comp) {
+                            emit_component_done(&app_out, &component_timer_out, status);
+                        } else if is_warning_line(&line) {
+                            // Capture raw WARNING lines against whichever
+                            // component is currently installing. The frontend
+                            // later matches these against the Forge's known-
+                            // issue catalog to classify severity and surface
+                            // a "6 cosmetic · 1 unknown" breakdown in the
+                            // Issues panel.
+                            capture_warning(&component_timer_out, &line);
+                        }
+                    }
+
                     // Detect "Copying and patching N files ..." for large operations
                     if let Some(count) = parse_bulk_file_count(&line) {
                         if count >= 500 {
@@ -157,7 +344,7 @@ pub fn run_batch(
                     // (batch results are logged by the tracker at batch level)
                     if let Some(ref lg) = logger_out {
                         let ll = line.to_lowercase();
-                        if line.contains("[EET Mod Runner]")
+                        if line.contains("[Infinity Mod Runner]")
                             || ll.contains("not installed due to")
                         {
                             if let Ok(mut l) = lg.lock() {
@@ -239,12 +426,12 @@ pub fn run_batch(
                                 let answer = &readln_answers[readln_idx];
                                 readln_idx += 1;
                                 let _ = app_out.emit("install:stdout",
-                                    format!("[EET Mod Runner] Auto-answering READLN: {answer}"));
+                                    format!("[Infinity Mod Runner] Auto-answering READLN: {answer}"));
                                 send_to_weidu(answer);
                             } else if !readln_fallback.is_empty() {
                                 // Use fallback (default "1")
                                 let _ = app_out.emit("install:stdout",
-                                    format!("[EET Mod Runner] Auto-answering READLN (fallback): {readln_fallback}"));
+                                    format!("[Infinity Mod Runner] Auto-answering READLN (fallback): {readln_fallback}"));
                                 send_to_weidu(&readln_fallback);
                             } else {
                                 // No config, no fallback — forward to GUI with timeout
@@ -263,7 +450,7 @@ pub fn run_batch(
                                         {
                                             clear_prompt_forwarded();
                                             let _ = app_timeout.emit("install:stdout", format!(
-                                                "[EET Mod Runner] READLN timeout after {readln_timeout_secs}s, auto-answering: {timeout_fallback}"));
+                                                "[Infinity Mod Runner] READLN timeout after {readln_timeout_secs}s, auto-answering: {timeout_fallback}"));
                                             send_to_weidu(&timeout_fallback);
                                         }
                                     });
@@ -278,15 +465,85 @@ pub fn run_batch(
         None
     };
 
-    // Stream stderr
+    // Stream stderr. Also opportunistically parse the BCS buffer cache
+    // stats line that the patched WeiDU emits at process exit, and
+    // forward it as a structured `install:bcs_cache_stats` event so the
+    // UI can surface hit rates / memory for A/B measurement.
     let app_err = app.clone();
     let logger_err = logger.clone();
+    let batch_index_err = batch.batch_index;
+    let mod_name_err = batch.mod_name.clone();
     let stderr_handle = if let Some(err) = stderr {
         Some(std::thread::spawn(move || {
             let reader = BufReader::new(err);
             for line in reader.lines() {
                 if let Ok(line) = line {
-                    let _ = app_err.emit("install:stderr", &line);
+                    // BCS cache lines are diagnostics from the patched
+                    // WeiDU's at_exit handler, NOT errors. Three cases:
+                    //   1. JSON prefix (`BCS_CACHE_STATS_JSON {...}`) —
+                    //      wire format for the structured event emitter
+                    //      below. Suppressed from the UI because the
+                    //      human-readable line that follows carries the
+                    //      same information in a readable form. Still
+                    //      parsed here for the `install:bcs_cache_stats`
+                    //      event AND still written to install.log below
+                    //      so A/B analysis scripts can grep it later.
+                    //   2. Human-readable summary (`BCS buffer cache: ...`)
+                    //      — shown as stdout (not stderr-red) because it's
+                    //      informational, not an error.
+                    //   3. Everything else on stderr stays as stderr.
+                    let is_json_bcs = line.starts_with(super::cache_stats::WIRE_PREFIX);
+                    let is_human_bcs = line.starts_with("BCS buffer cache:");
+                    if is_json_bcs {
+                        // Don't emit to UI — the human-readable summary
+                        // already covers it for the user. Still parsed +
+                        // logged to disk below.
+                    } else if is_human_bcs {
+                        let _ = app_err.emit("install:stdout", &line);
+                    } else {
+                        let _ = app_err.emit("install:stderr", &line);
+                    }
+                    // Three-state parse: None = not a cache line (ignore),
+                    // Ok = forward as success event, Err = prefix matched
+                    // but body was malformed — surface as a diagnostic so
+                    // format drift is loud rather than silent.
+                    match super::cache_stats::try_parse_line(&line) {
+                        None => {}
+                        Some(Ok(stats)) => {
+                            let _ = app_err.emit(
+                                "install:bcs_cache_stats",
+                                // Field name is `batch_idx` (not `batch_index`)
+                                // to match every other batch-indexed event in
+                                // the runner — see orchestrator.rs, tracker.rs.
+                                // The frontend's listener on this event reads
+                                // `batch_idx`; the earlier mismatch produced
+                                // `NaN` in the tooltip's "batch #" readout.
+                                serde_json::json!({
+                                    "batch_idx": batch_index_err,
+                                    "mod_name": mod_name_err.clone(),
+                                    "enabled": stats.enabled,
+                                    "hits": stats.hits,
+                                    "misses": stats.misses,
+                                    "hit_rate_pct": stats.hit_rate_pct,
+                                    "evictions": stats.evictions,
+                                    "peak_kb": stats.peak_kb,
+                                    "current_kb": stats.current_kb,
+                                    "max_mb": stats.max_mb,
+                                }),
+                            );
+                        }
+                        Some(Err(err)) => {
+                            let _ = app_err.emit(
+                                "install:bcs_cache_stats_parse_error",
+                                serde_json::json!({
+                                    "batch_idx": batch_index_err,
+                                    "mod_name": mod_name_err.clone(),
+                                    "raw_body": err.raw_body,
+                                    "reason": err.reason,
+                                }),
+                            );
+                        }
+                    }
                     if let Some(ref lg) = logger_err {
                         if let Ok(mut l) = lg.lock() {
                             l.log_stderr(&line);
@@ -299,8 +556,14 @@ pub fn run_batch(
         None
     };
 
-    // Wait for process with timeout
-    let timeout = std::time::Duration::from_secs(config.timeout_secs);
+    // Wait for process with timeout. Some mods (notably dw_talents HLAs on
+    // megainstalls) legitimately exceed the 2h global cap; InstallConfig
+    // exposes a per-mod override map keyed by lowercase mod_name.
+    let effective_timeout_secs = config.per_mod_timeout_secs
+        .get(&batch.mod_name.to_lowercase())
+        .copied()
+        .unwrap_or(config.timeout_secs);
+    let timeout = std::time::Duration::from_secs(effective_timeout_secs);
     let start = std::time::Instant::now();
     let exit_status = loop {
         match child.try_wait() {
@@ -309,7 +572,7 @@ pub fn run_batch(
                 if start.elapsed() > timeout {
                     // Timeout — kill the process
                     let _ = child.kill();
-                    break Err(format!("WeiDU timed out after {}s", config.timeout_secs));
+                    break Err(format!("WeiDU timed out after {}s", effective_timeout_secs));
                 }
                 if abort_flag.load(Ordering::SeqCst) {
                     let _ = child.kill();
@@ -369,6 +632,7 @@ pub fn run_batch(
                     component_name: comp.component_name.clone(),
                     status: ComponentStatus::Error,
                     message: Some(msg.clone()),
+                    warnings: Vec::new(),
                 }
             }).collect());
         }
@@ -391,16 +655,88 @@ pub fn run_batch(
         None
     };
 
-    // Build results — we'll refine with DEBUG parsing in the orchestrator
-    let results: Vec<ComponentResult> = batch.components.iter().map(|comp| {
-        ComponentResult {
-            mod_name: comp.mod_name.clone(),
-            component: comp.component,
-            component_name: comp.component_name.clone(),
-            status: if success { ComponentStatus::Success } else { ComponentStatus::Error },
-            message: error_detail.clone(),
-        }
-    }).collect();
+    // Build results — we'll refine with DEBUG parsing in the orchestrator.
+    //
+    // When the batch succeeded (exit 0/3), consult the stdout-observed
+    // per-component status so a component WeiDU tagged "installed with
+    // warnings" lands as ComponentStatus::Warning rather than Success.
+    // Before this, any component with a harmless-but-noisy warning (e.g.
+    // cdtweaks's "Installed with errors (found in weidu.log)" flow) still
+    // showed as Success in the Issues panel — which meant warning-only
+    // mods were entirely invisible in the post-install review surface.
+    //
+    // When the batch failed (non-zero exit), we stick with the blanket
+    // Error classification here and let `refine_results_from_log` in the
+    // orchestrator reclassify per-component using weidu.log as the
+    // authority — that path already handles Error→Warning upgrades when
+    // the log shows the component actually did install.
+    let (observed_snapshot, warnings_snapshot): (Vec<Option<&'static str>>, Vec<Vec<String>>) =
+        component_timer
+            .lock()
+            .map(|t| (t.observed.clone(), t.warnings.clone()))
+            .unwrap_or_else(|_| (
+                vec![None; batch.components.len()],
+                vec![Vec::new(); batch.components.len()],
+            ));
+
+    let results: Vec<ComponentResult> = batch.components.iter()
+        .enumerate()
+        .map(|(idx, comp)| {
+            let observed = observed_snapshot.get(idx).copied().flatten();
+            let warnings = warnings_snapshot.get(idx).cloned().unwrap_or_default();
+            // Per-component stdout from WeiDU is authoritative for the
+            // component's outcome — regardless of whether the batch as a
+            // whole exited 0 (success) or non-zero (one later component
+            // errored and triggered rollback of ITS changes, but earlier
+            // SUCCESSFULLY INSTALLED components are real).
+            //
+            // Previously we took a "batch failed → blanket Error" path, which
+            // caused Test #37 imoen_forever: 6 components printed
+            // "SUCCESSFULLY INSTALLED" to stdout but were misclassified as
+            // Warning ("Installed with errors (found in weidu.log)") after
+            // refine_results_from_log saw them in weidu.log. They should be
+            // Success.
+            //
+            // Classification rules (applied in both success and failure cases):
+            //   observed = Some("success") → Success
+            //   observed = Some("warning") → Warning
+            //   observed = Some("error")   → Error
+            //   observed = None            → depends on batch exit:
+            //     batch success → Success (no line seen, trust batch exit)
+            //     batch failure → Error   (could be the failing component
+            //                              or one that never ran — let
+            //                              refine_results_from_log decide
+            //                              Error→Skipped/Warning based on
+            //                              weidu.log presence)
+            let (status, message) = match observed {
+                Some("success") => (ComponentStatus::Success, None),
+                Some("warning") => (
+                    ComponentStatus::Warning,
+                    Some("Installed with warnings".to_string()),
+                ),
+                Some("error") => (
+                    ComponentStatus::Error,
+                    Some("Component reported NOT INSTALLED".to_string()),
+                ),
+                _ => {
+                    // No completion line observed.
+                    if success {
+                        (ComponentStatus::Success, error_detail.clone())
+                    } else {
+                        (ComponentStatus::Error, error_detail.clone())
+                    }
+                }
+            };
+            ComponentResult {
+                mod_name: comp.mod_name.clone(),
+                component: comp.component,
+                component_name: comp.component_name.clone(),
+                status,
+                message,
+                warnings,
+            }
+        })
+        .collect();
 
     Ok(results)
 }

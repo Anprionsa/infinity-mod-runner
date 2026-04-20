@@ -1,12 +1,12 @@
 [package]
-name = "eet-mod-runner"
-version = "0.9.0"
-description = "EET Mod Runner — GUI installer for Infinity Engine mods"
+name = "infinity-mod-runner"
+version = "1.0.3"
+description = "Infinity Mod Runner — GUI installer for Infinity Engine mods"
 authors = ["Anprionsa"]
 edition = "2024"
 
 [lib]
-name = "eet_mod_runner_lib"
+name = "infinity_mod_runner_lib"
 crate-type = ["staticlib", "rlib"]
 
 [build-dependencies]
@@ -15,17 +15,17 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
-tauri-plugin-fs = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 confy = "0.6"
 log = "0.4"
-env_logger = "0.11"
 dirs = "6"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 tempfile = "3"
 tauri-plugin-opener = "2"
+md5 = "0.7"
+sha2 = "0.10"
 indexmap = "2"
 fs2 = "0.4"
 tauri-plugin-updater = "2"

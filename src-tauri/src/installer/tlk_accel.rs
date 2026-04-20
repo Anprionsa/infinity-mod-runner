@@ -34,7 +34,7 @@ impl TlkAccelerator {
                 .map(PathBuf::from)
                 .unwrap_or_else(|| std::env::temp_dir());
             let game_hash = super::short_path_hash(&game_dir.to_string_lossy());
-            Some(base.join(format!("eet-mod-runner-tlk-{game_hash}")))
+            Some(base.join(format!("infinity-mod-runner-tlk-{game_hash}")))
         } else {
             None
         };
@@ -104,7 +104,7 @@ impl TlkAccelerator {
             .ok_or("Fast dir not set but redirected flag is true")?;
 
         let _ = app.emit("install:stdout",
-            "[EET Mod Runner] TLK acceleration: restoring original lang directory...");
+            "[Infinity Mod Runner] TLK acceleration: restoring original lang directory...");
 
         let backup_dir = self.game_dir.join("lang")
             .join(format!("{}.eetmr_backup", self.language));
@@ -151,7 +151,7 @@ impl TlkAccelerator {
 
         self.redirected = false;
         let _ = app.emit("install:stdout",
-            "[EET Mod Runner] TLK acceleration: restored successfully");
+            "[Infinity Mod Runner] TLK acceleration: restored successfully");
 
         Ok(())
     }
@@ -194,11 +194,11 @@ impl TlkAccelerator {
 
         // Check for fast dir with newer TLK
         let temp_pattern = std::env::temp_dir();
-        // Look for eet-mod-runner-tlk-* dirs in temp
+        // Look for infinity-mod-runner-tlk-* dirs in temp
         if let Ok(entries) = std::fs::read_dir(&temp_pattern) {
             for entry in entries.filter_map(|e| e.ok()) {
                 let name = entry.file_name().to_string_lossy().to_string();
-                if name.starts_with("eet-mod-runner-tlk-") {
+                if name.starts_with("infinity-mod-runner-tlk-") {
                     let fast_tlk = entry.path().join("dialog.tlk");
                     let backup_tlk = backup_dir.join("dialog.tlk");
                     if fast_tlk.exists() && backup_tlk.exists() {
@@ -227,7 +227,7 @@ impl TlkAccelerator {
             let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
             let size_mb = size as f64 / 1_048_576.0;
             let _ = app.emit("install:stdout",
-                format!("[EET Mod Runner] Pre-warming dialog.tlk ({:.1} MB) into page cache...", size_mb));
+                format!("[Infinity Mod Runner] Pre-warming dialog.tlk ({:.1} MB) into page cache...", size_mb));
 
             let start = std::time::Instant::now();
             // Read entire file — OS keeps it in page cache
@@ -235,7 +235,7 @@ impl TlkAccelerator {
             let elapsed = start.elapsed();
 
             let _ = app.emit("install:stdout",
-                format!("[EET Mod Runner] Page cache warm ({:.0}ms)", elapsed.as_millis()));
+                format!("[Infinity Mod Runner] Page cache warm ({:.0}ms)", elapsed.as_millis()));
             self.last_prewarm = std::time::Instant::now();
         }
     }
@@ -253,13 +253,13 @@ impl TlkAccelerator {
             let fast_drive = fast_dir.to_string_lossy().chars().next();
             if game_drive == fast_drive {
                 let _ = app.emit("install:stdout",
-                    "[EET Mod Runner] TLK fast-drive: same drive as game, skipping junction (no benefit)");
+                    "[Infinity Mod Runner] TLK fast-drive: same drive as game, skipping junction (no benefit)");
                 return Ok(());
             }
         }
 
         let _ = app.emit("install:stdout",
-            format!("[EET Mod Runner] TLK fast-drive: redirecting lang to {}", fast_dir.display()));
+            format!("[Infinity Mod Runner] TLK fast-drive: redirecting lang to {}", fast_dir.display()));
 
         // 1. Create fast dir
         std::fs::create_dir_all(fast_dir)
@@ -313,7 +313,7 @@ impl TlkAccelerator {
         let tlk_size = fast_dir.join("dialog.tlk")
             .metadata().map(|m| m.len()).unwrap_or(0);
         let _ = app.emit("install:stdout",
-            format!("[EET Mod Runner] TLK fast-drive active — dialog.tlk ({:.1} MB) on fast storage",
+            format!("[Infinity Mod Runner] TLK fast-drive active — dialog.tlk ({:.1} MB) on fast storage",
                 tlk_size as f64 / 1_048_576.0));
 
         Ok(())

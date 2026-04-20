@@ -1,7 +1,7 @@
 {
-  "name": "eet-mod-runner",
+  "name": "infinity-mod-runner",
   "private": true,
-  "version": "0.9.0-beta",
+  "version": "1.0.3-beta",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -12,7 +12,6 @@
   "dependencies": {
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-dialog": "^2",
-    "@tauri-apps/plugin-fs": "^2",
     "@tauri-apps/plugin-opener": "^2.5.3",
     "@tauri-apps/plugin-process": "^2.3.1",
     "@tauri-apps/plugin-updater": "^2.10.1",

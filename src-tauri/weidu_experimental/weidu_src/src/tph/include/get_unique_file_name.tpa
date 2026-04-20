@@ -1,0 +1,69 @@
+DEFINE_ACTION_FUNCTION ~GET_UNIQUE_FILE_NAME~
+  STR_VAR extension = ""
+          base = ""
+  RET filename
+  BEGIN
+    OUTER_PATCH ~~ BEGIN
+      LPF ~GET_UNIQUE_FILE_NAME~ STR_VAR extension = EVALUATE_BUFFER "%extension%" base = EVALUATE_BUFFER "%base%" RET filename = filename END
+    END
+END
+
+DEFINE_PATCH_FUNCTION ~BASE36~
+  INT_VAR
+    value = 0
+  RET
+    base36
+  BEGIN
+    PATCH_IF value < 0 || value >= 36 * 36 * 36 * 36 THEN BEGIN
+      PATCH_FAIL ~BASE36 called on %value% (out of bounds 0 <= x < 36 **4)~
+    END
+
+    INNER_PATCH_SAVE base36 ~0000~ BEGIN
+      FOR (i = 3; i >= 0; --i) BEGIN
+        digit = value - (value / 36) * 36
+        value = value / 36
+        WRITE_BYTE i digit + (digit < 10 ? 0x30 : 0x57)
+      END
+    END
+END
+
+DEFINE_PATCH_FUNCTION ~GET_UNIQUE_FILE_NAME~
+  STR_VAR
+          extension = ""
+          base = ""
+  RET filename
+  BEGIN
+    PATCH_IF ~%extension%~ STRING_EQUAL_CASE ~~ THEN BEGIN
+      PATCH_FAIL ~GET_UNIQUE_FILE_NAME requires to define the extension variable.~
+    END
+
+    INNER_ACTION BEGIN
+      ACTION_IF ! FILE_EXISTS_IN_GAME ~get_unique_filename_%extension%.ids~ THEN BEGIN
+        <<<<<<<< empty
+        >>>>>>>>
+        COPY + empty ~override/get_unique_filename_%extension%.ids~
+      END
+    END
+
+    value = ~%base%~ STR_CMP ~~ ?
+      IDS_OF_SYMBOL (~get_unique_filename_%extension%~ ~%base%~) : 0 - 1
+    PATCH_IF value = 0 - 1 THEN BEGIN
+      found = 0
+      WHILE !found BEGIN
+        ++value
+        LPF ~BASE36~ INT_VAR value = value RET maybe = base36 END
+        LOOKUP_IDS_SYMBOL_OF_INT exists ~get_unique_filename_%extension%~ value
+        PATCH_IF IS_AN_INT exists
+          && !FILE_EXISTS_IN_GAME ~__%maybe%.%extension%~ THEN BEGIN
+          found = 1
+        END
+      END
+      INNER_ACTION BEGIN
+        APPEND + ~get_unique_filename_%extension%.ids~ ~%value% %base%~
+      END
+    END ELSE BEGIN
+      LPF ~BASE36~ INT_VAR value = value RET maybe = base36 END
+    END
+
+    SPRINT filename ~__%maybe%~
+END

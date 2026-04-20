@@ -1,0 +1,355 @@
+name: Rebuild Experimental WeiDU
+
+# Rebuilds the patched WeiDU binaries that ship with the experimental
+# "Resilient WeiDU" feature. Builds directly from the vendored source
+# tree at src-tauri/weidu_experimental/weidu_src/ — no upstream clone.
+#
+# Runs on:
+#   - manual dispatch (for ad-hoc rebuilds and version bumps)
+#   - push that touches weidu_src/** (source changed, binaries need rebuilding)
+#
+# Outputs: commits fresh zips + updated meta.json back to the triggering branch,
+# gated by a headless smoke test (good/bad/no-game syntax compile checks).
+#
+# See src-tauri/weidu_experimental/README.md for the full maintenance workflow.
+#
+# Layout note: the infinity-mod-runner repo is checked out at $GITHUB_WORKSPACE.
+# setup-ocaml places _opam at the workspace root, so elkhound lands in
+# _opam/bin and the OCaml toolchain is on PATH. The build then cd's into
+# weidu_src and runs make from there.
+
+on:
+  workflow_dispatch: {}
+  push:
+    branches: [main]
+    paths:
+      - "src-tauri/weidu_experimental/weidu_src/**"
+      - ".github/workflows/weidu-rebuild.yml"
+
+permissions:
+  contents: write
+
+concurrency:
+  # One rebuild at a time per branch — two concurrent runs racing to commit
+  # meta.json would collide.
+  group: weidu-rebuild-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # Pinned to match the fork's known-working elkhound. If this 404s, bump.
+  ELKHOUND_RELEASE: "1.0.3"
+  # Vendored WeiDU source root (relative to $GITHUB_WORKSPACE).
+  WEIDU_SRC: "src-tauri/weidu_experimental/weidu_src"
+
+jobs:
+  # ── Read config ──
+  resolve:
+    runs-on: ubuntu-22.04
+    outputs:
+      base_version: ${{ steps.resolve.outputs.base_version }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Resolve build parameters
+        id: resolve
+        shell: bash
+        run: |
+          set -eu
+          BASE_VERSION=$(jq -r '.base_weidu_version' src-tauri/weidu_experimental/meta.json)
+          echo "base_version=${BASE_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Building vendored WeiDU (meta.json base_weidu_version=${BASE_VERSION})"
+
+  # ── Windows ──
+  build-windows:
+    needs: resolve
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch elkhound
+        shell: pwsh
+        run: |
+          curl -Lv https://github.com/The-Mod-Elephant/elkhound/releases/download/${{ env.ELKHOUND_RELEASE }}/elkhound.exe -o elkhound.exe
+
+      - name: Setup OCaml
+        uses: ocaml/setup-ocaml@v3.5.1
+        with:
+          ocaml-compiler: ocaml-variants.4.14.2+options,ocaml-option-default-unsafe-string
+
+      - name: Setup zip and upx
+        run: choco install -y upx zip
+
+      - name: Build WeiDU (vendored)
+        shell: pwsh
+        run: |
+          # setup-ocaml puts _opam at the workspace root. Elkhound goes in its bin.
+          mv elkhound.exe _opam/bin/elkhound.exe
+          opam switch
+          (& opam env) -split '\r?\n' | ForEach-Object { Invoke-Expression $_ }
+          cd "${{ env.WEIDU_SRC }}"
+          make
+          make windows_zip
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: weidu-windows
+          path: ${{ env.WEIDU_SRC }}/WeiDU-Windows-*.zip
+          if-no-files-found: error
+
+  # ── Linux ──
+  build-linux:
+    needs: resolve
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch elkhound
+        run: |
+          mkdir -p bin
+          curl -Lv https://github.com/The-Mod-Elephant/elkhound/releases/download/${{ env.ELKHOUND_RELEASE }}/lin-elkhound -o bin/elkhound
+          chmod +x bin/elkhound
+
+      - name: Setup OCaml
+        uses: ocaml/setup-ocaml@v3.5.1
+        with:
+          ocaml-compiler: 4.08.1+default-unsafe-string
+
+      - name: Build WeiDU (vendored)
+        run: |
+          set -eu
+          export PATH="$PATH:$PWD/bin"
+          opam switch
+          eval $(opam env)
+          cd "${{ env.WEIDU_SRC }}"
+          mkdir -p obj/x86_LINUX obj/.depend
+          make
+          make linux_zip
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: weidu-linux
+          path: ${{ env.WEIDU_SRC }}/WeiDU-Linux-*.zip
+          if-no-files-found: error
+
+  # ── macOS (ARM64) ──
+  build-macos:
+    needs: resolve
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch elkhound
+        run: |
+          mkdir -p bin
+          curl -Lv https://github.com/The-Mod-Elephant/elkhound/releases/download/${{ env.ELKHOUND_RELEASE }}/mac-arm-elkhound -o bin/elkhound
+          chmod +x bin/elkhound
+
+      - name: Setup OCaml
+        uses: ocaml/setup-ocaml@v3.5.1
+        with:
+          ocaml-compiler: ocaml-variants.4.14.2+options,ocaml-option-default-unsafe-string
+
+      - name: Setup zip and upx
+        run: |
+          export HOMEBREW_NO_AUTO_UPDATE=1
+          brew install zip upx
+
+      - name: Build WeiDU (vendored)
+        run: |
+          set -eu
+          export PATH="$PATH:$PWD/bin"
+          opam switch
+          eval $(opam env)
+          cd "${{ env.WEIDU_SRC }}"
+          mkdir -p obj/x86_LINUX obj/.depend
+          make
+          make osx_zip
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: weidu-macos
+          path: ${{ env.WEIDU_SRC }}/WeiDU-Mac-*.zip
+          if-no-files-found: error
+
+  # ── Headless smoke tests ──
+  # Runs the syntax-only subset of weidu_src/test/ against the built Linux
+  # binary. We skip auto-test (needs Dialog.bif) and tp2 regression (installs
+  # as a mod, needs a game) — those stay local pre-commit checks.
+  #
+  # If this fails, commit-binaries does NOT run — no shipping broken binaries.
+  smoke-test:
+    needs: [build-linux]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Linux artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: weidu-linux
+          path: smoke
+
+      - name: Extract weidu binary
+        shell: bash
+        run: |
+          set -eu
+          cd smoke
+          unzip -q WeiDU-Linux-*.zip
+          chmod +x WeiDU-Linux/weidu
+          echo "WEIDU_BIN=$PWD/WeiDU-Linux/weidu" >> "$GITHUB_ENV"
+          "$PWD/WeiDU-Linux/weidu" --version || true
+
+      - name: Run headless compile tests
+        shell: bash
+        working-directory: ${{ env.WEIDU_SRC }}/test
+        run: |
+          set -eu
+          fail=0
+
+          echo "=== good-syntax — expect success ==="
+          for f in good-syntax/*.d; do
+            echo "--- $f"
+            if ! "$WEIDU_BIN" --nogame "$f"; then
+              echo "FAIL: $f should have compiled"
+              fail=1
+            fi
+          done
+
+          echo "=== bad-syntax — expect failure ==="
+          for f in bad-syntax/*.d; do
+            echo "--- $f"
+            if "$WEIDU_BIN" --nogame "$f" >/dev/null 2>&1; then
+              echo "FAIL: $f should have failed to compile"
+              fail=1
+            fi
+          done
+
+          echo "=== no-game — expect success ==="
+          for f in no-game/*.d; do
+            echo "--- $f"
+            if ! "$WEIDU_BIN" --nogame "$f"; then
+              echo "FAIL: $f should have compiled"
+              fail=1
+            fi
+          done
+
+          if [ "$fail" -ne 0 ]; then
+            echo "Smoke tests failed."
+            exit 1
+          fi
+          echo "All smoke tests passed."
+
+  # ── Commit back ──
+  # Gated on smoke-test: binaries only ship if headless compile tests pass.
+  commit-binaries:
+    needs: [resolve, build-windows, build-linux, build-macos, smoke-test]
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout infinity-mod-runner
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          # Default GITHUB_TOKEN. If the branch is protected, configure a PAT
+          # or switch to opening a PR via peter-evans/create-pull-request.
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: weidu-windows
+          path: build-out/windows
+
+      - name: Download Linux artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: weidu-linux
+          path: build-out/linux
+
+      - name: Download macOS artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: weidu-macos
+          path: build-out/macos
+
+      - name: Stage binaries with canonical names
+        shell: bash
+        run: |
+          set -eu
+          DEST="src-tauri/weidu_experimental/binaries"
+          mkdir -p "$DEST"
+          cp build-out/windows/WeiDU-Windows-*.zip "$DEST/windows-x86_64.zip"
+          cp build-out/macos/WeiDU-Mac-*.zip        "$DEST/macos.zip"
+          cp build-out/linux/WeiDU-Linux-*.zip      "$DEST/linux-x86_64.zip"
+          ls -la "$DEST"
+
+      - name: Update meta.json with fresh hashes
+        shell: bash
+        run: |
+          set -eu
+          python3 <<'PY'
+          import hashlib, json, zipfile, os, sys
+          base = "src-tauri/weidu_experimental/binaries"
+          meta_path = "src-tauri/weidu_experimental/meta.json"
+          with open(meta_path) as f:
+              meta = json.load(f)
+
+          targets = [
+              ("windows-x86_64", "windows-x86_64.zip"),
+              ("macos",          "macos.zip"),
+              ("linux-x86_64",   "linux-x86_64.zip"),
+          ]
+
+          for key, zname in targets:
+              entry = meta["platforms"].get(key)
+              if entry is None:
+                  print(f"WARN: no platform entry '{key}' in meta.json, skipping", file=sys.stderr)
+                  continue
+              zpath = os.path.join(base, zname)
+              zbytes = open(zpath, "rb").read()
+              entry["zip"] = f"binaries/{zname}"
+              entry["zip_sha256"] = hashlib.sha256(zbytes).hexdigest()
+              entry["zip_size"] = len(zbytes)
+
+              with zipfile.ZipFile(zpath) as zf:
+                  inner_path = entry.get("weidu_path_in_zip") or ""
+                  names = zf.namelist()
+                  # Fall through to auto-discovery if stored path is stale.
+                  if inner_path not in names:
+                      candidates = [n for n in names
+                                    if n.lower().endswith("/weidu") or n.lower().endswith("/weidu.exe")]
+                      if not candidates:
+                          raise SystemExit(f"No weidu binary found in {zpath}")
+                      inner_path = candidates[0]
+                      entry["weidu_path_in_zip"] = inner_path
+                  bin_bytes = zf.read(inner_path)
+                  entry["weidu_sha256"] = hashlib.sha256(bin_bytes).hexdigest()
+                  entry["weidu_size"] = len(bin_bytes)
+
+          with open(meta_path, "w") as f:
+              json.dump(meta, f, indent=2)
+              f.write("\n")
+          print("meta.json updated")
+          PY
+          echo "--- Diff preview ---"
+          git --no-pager diff src-tauri/weidu_experimental/meta.json || true
+
+      - name: Commit and push
+        shell: bash
+        run: |
+          set -eu
+          git config user.name  "infinity-mod-runner-ci[bot]"
+          git config user.email "ci@infinitymodforge.invalid"
+          git add src-tauri/weidu_experimental/binaries/ src-tauri/weidu_experimental/meta.json
+
+          if git diff --cached --quiet; then
+            echo "No changes to commit — binaries + meta are already up to date."
+            exit 0
+          fi
+
+          BASE="${{ needs.resolve.outputs.base_version }}"
+          git commit -m "ci: rebuild experimental WeiDU (base ${BASE})" \
+                     -m "Triggered by ${{ github.event_name }} on ${{ github.ref_name }}." \
+                     -m "Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          git push origin HEAD:${{ github.ref_name }}

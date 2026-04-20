@@ -33,6 +33,7 @@ type SelectedItem = {
   componentCount: number;
   tier?: number;
   difficulty?: string;
+  schemaVersion?: number;
 };
 
 
@@ -72,6 +73,25 @@ export default function PresetBrowser({ open, onClose, onLoad, forgeUrl, languag
   const [searchQuery, setSearchQuery] = useState("");
   const [focusFilter, setFocusFilter] = useState<Set<string>>(new Set());
   const [sortBy, setSortBy] = useState<"newest" | "components">("newest");
+
+  // Versions of community builds the user has previously loaded (id -> version).
+  // Stored in localStorage so update detection works across app restarts.
+  // Initialized lazily and refreshed when a build is loaded.
+  const [loadedBuildVersions, setLoadedBuildVersions] = useState<Record<string, string>>(() => {
+    try {
+      const raw = localStorage.getItem("runner_loaded_build_versions");
+      return raw ? JSON.parse(raw) : {};
+    } catch { return {}; }
+  });
+  const markBuildLoaded = useCallback((id: string, version?: string) => {
+    if (!version) return;
+    setLoadedBuildVersions(prev => {
+      if (prev[id] === version) return prev;
+      const next = { ...prev, [id]: version };
+      try { localStorage.setItem("runner_loaded_build_versions", JSON.stringify(next)); } catch { /* ignore */ }
+      return next;
+    });
+  }, []);
 
   const loadData = useCallback(() => {
     setLoading(true);
@@ -127,7 +147,7 @@ export default function PresetBrowser({ open, onClose, onLoad, forgeUrl, languag
     setResolving(true);
     setResolveError(null);
     try {
-      const { eetLog, bgeeLog, skipped } = await resolvePresetToLog(forgeUrl, selected.keys, language);
+      const { eetLog, bgeeLog, skipped } = await resolvePresetToLog(forgeUrl, selected.keys, language, selected.schemaVersion ?? 1);
       const parsed = buildParsedLog(eetLog, bgeeLog || null, null, null);
       parsed.presetSource = { name: selected.name, type: selected.type, componentCount: selected.keys.length };
       guiLog.info("PRESET", `Loaded "${selected.name}" (${selected.type}, ${selected.keys.length} keys, mode=${mode}, skipped=${skipped})`);
@@ -146,7 +166,7 @@ export default function PresetBrowser({ open, onClose, onLoad, forgeUrl, languag
 
   if (!open) return null;
 
-  const tierColors: Record<number, string> = { 1: "#4ade80", 2: "#fbbf24", 3: "#f87171" };
+  const tierColors: Record<number, string> = { 1: "var(--grn)", 2: "var(--tx-warn)", 3: "var(--red)" };
   const tierLabels: Record<number, string> = { 1: t("tier.beginner", "Beginner"), 2: t("tier.intermediate", "Intermediate"), 3: t("tier.expert", "Expert") };
 
   // Split presets into guided (have tier) and themed (no tier)
@@ -155,7 +175,7 @@ export default function PresetBrowser({ open, onClose, onLoad, forgeUrl, languag
 
   return (
     <div style={{
-      position: "fixed", inset: 0, background: "#000",
+      position: "fixed", inset: 0, background: "var(--bg)",
       display: "flex", alignItems: "center", justifyContent: "center", zIndex: 2000,
     }} onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
       <div style={{
@@ -180,7 +200,7 @@ export default function PresetBrowser({ open, onClose, onLoad, forgeUrl, languag
             <div style={{ textAlign: "center", padding: 40, color: "var(--txd)" }}>{t("btn.loading", "Loading...")}</div>
           )}
           {error && (
-            <div style={{ color: "var(--red)", padding: 12, background: "rgba(255,50,50,0.08)", borderRadius: 6, marginBottom: 16 }}>
+            <div className="alert err" style={{ padding: 12, marginBottom: 16 }}>
               {error}
             </div>
           )}
@@ -201,6 +221,7 @@ export default function PresetBrowser({ open, onClose, onLoad, forgeUrl, languag
                           type: "preset", id: p.id, name: p.name, desc: p.desc, keys: p.keys,
                           icon: p.icon, color: p.color, componentCount: p.keys.length,
                           tier: p.tier, difficulty: p.difficulty,
+                          schemaVersion: p.schemaVersion,
                         })} />
                     ))}
                   </div>
@@ -220,6 +241,7 @@ export default function PresetBrowser({ open, onClose, onLoad, forgeUrl, languag
                         onClick={() => setSelected({
                           type: "preset", id: p.id, name: p.name, desc: p.desc, keys: p.keys,
                           icon: p.icon, color: p.color, componentCount: p.keys.length,
+                          schemaVersion: p.schemaVersion,
                         })} />
                     ))}
                   </div>
@@ -269,7 +291,7 @@ export default function PresetBrowser({ open, onClose, onLoad, forgeUrl, languag
               {filteredBuilds.length === 0 && (
                 <div style={{ color: "var(--txd)", fontSize: 12, fontStyle: "italic", padding: 20, textAlign: "center" }}>
                   {builds.length === 0
-                    ? t("preset.no_builds", "No community builds yet. Create one in EET Mod Forge!")
+                    ? t("preset.no_builds", "No community builds yet. Create one in Infinity Mod Forge!")
                     : t("preset.no_match", "No builds match your filters.")}
                 </div>
               )}
@@ -277,6 +299,7 @@ export default function PresetBrowser({ open, onClose, onLoad, forgeUrl, languag
               <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                 {filteredBuilds.map(b => (
                   <BuildCard key={b.id} build={b} tierColors={tierColors} tierLabels={tierLabels}
+                    loadedVersion={loadedBuildVersions[b.id]}
                     onClick={async () => {
                       setResolving(true);
                       setResolveError(null);
@@ -287,7 +310,10 @@ export default function PresetBrowser({ open, onClose, onLoad, forgeUrl, languag
                           type: "build", id: full.id, name: full.name, desc: full.desc, keys: full.keys,
                           icon: full.icon, color: full.color, componentCount: full.componentCount,
                           tier: full.tier, difficulty: full.difficulty,
+                          schemaVersion: full.schemaVersion,
                         });
+                        // Record that we've loaded this version so we can flag future updates.
+                        markBuildLoaded(full.id, full.version);
                       } catch (e) {
                         setResolveError(`Failed to load build: ${e}`);
                       } finally {
@@ -303,7 +329,7 @@ export default function PresetBrowser({ open, onClose, onLoad, forgeUrl, languag
         {/* ── Confirmation Dialog ── */}
         {selected && (
           <div style={{
-            position: "absolute", inset: 0, background: "rgba(0,0,0,0.7)",
+            position: "absolute", inset: 0, background: "var(--modal-backdrop)",
             display: "flex", alignItems: "center", justifyContent: "center", zIndex: 2001,
           }}>
             <div style={{
@@ -394,10 +420,12 @@ function PresetCard({ preset, tierColors, tierLabels, resolvedIcon, onClick }: {
   );
 }
 
-function BuildCard({ build, tierColors, tierLabels, onClick }: {
+function BuildCard({ build, tierColors, tierLabels, loadedVersion, onClick }: {
   build: CommunityBuildMeta;
   tierColors: Record<number, string>;
   tierLabels: Record<number, string>;
+  /** Version the user previously loaded for this build id, if any — used to flag updates. */
+  loadedVersion?: string;
   onClick: () => void;
 }) {
   const { t } = useI18n();
@@ -409,6 +437,7 @@ function BuildCard({ build, tierColors, tierLabels, onClick }: {
     if (days < 30) return `${Math.floor(days / 7)}w ago`;
     return `${Math.floor(days / 30)}mo ago`;
   };
+  const updateAvailable = !!(build.version && loadedVersion && build.version !== loadedVersion);
 
   return (
     <div onClick={onClick} style={{
@@ -425,9 +454,18 @@ function BuildCard({ build, tierColors, tierLabels, onClick }: {
           <div>
             <span style={{ fontWeight: 600, fontSize: 13 }}>{build.name}</span>
             <span style={{ fontSize: 11, color: "var(--txd)", marginLeft: 8 }}>{t("preset.by_author", "by")} {build.author}</span>
+            {build.version && <span style={{ fontSize: 10, color: "var(--txd)", marginLeft: 6, fontFamily: "monospace" }}>v{build.version}</span>}
+            {updateAvailable && (
+              <span style={{
+                marginLeft: 6, padding: "1px 6px", borderRadius: 8, fontSize: 9, fontWeight: 700,
+                background: "var(--grn)", color: "var(--bg)",
+              }} title={`Installed: v${loadedVersion} - Available: v${build.version}`}>
+                {t("preset.update_available", "UPDATE")}
+              </span>
+            )}
           </div>
         </div>
-        <div style={{ fontSize: 10, color: "var(--txd)" }}>{relativeDate(build.createdAt)}</div>
+        <div style={{ fontSize: 10, color: "var(--txd)" }}>{relativeDate(build.updatedAt || build.createdAt)}</div>
       </div>
       <div style={{ fontSize: 11, color: "var(--txd)", marginTop: 4, lineHeight: 1.3, maxHeight: 32, overflow: "hidden" }}>
         {build.desc}

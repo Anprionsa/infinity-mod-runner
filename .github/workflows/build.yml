@@ -90,11 +90,60 @@ jobs:
           ls -la artifacts/
 
       - name: Upload artifacts
+        id: upload-unsigned
         uses: actions/upload-artifact@v7
         with:
-          name: eet-mod-runner-${{ matrix.platform }}
+          name: infinity-mod-runner-${{ matrix.platform }}
           path: artifacts/
           if-no-files-found: warn
+
+      # ─── Authenticode signing via SignPath.io OSS (Phase 16a) ───
+      #
+      # State: stub only. Until the SignPath.io Open-Source application is
+      # approved AND repository secrets + vars are configured, these steps
+      # are commented out and the Windows installer ships unsigned. The
+      # user-facing SmartScreen warning is documented in README's
+      # "First-launch warnings" section.
+      #
+      # Activation procedure (once SignPath approves the project):
+      #   1. Create an API token in SignPath.io and add repo secrets:
+      #         SIGNPATH_API_TOKEN    — the signing API token
+      #         SIGNPATH_ORG_ID       — your SignPath organization GUID
+      #   2. Add a repository variable:
+      #         ENABLE_SIGNPATH = "true"
+      #      (acts as a master switch; forks without it set skip signing)
+      #   3. Update the slug values below to match what SignPath assigned
+      #      (`project-slug`, `signing-policy-slug`, `artifact-configuration-slug`).
+      #   4. Uncomment the two steps. Push a tag. The SignPath action will
+      #      download the uploaded unsigned artifact via its GitHub
+      #      artifact id, sign the `.exe`/`.msi` inside, and emit the signed
+      #      files to `artifacts-signed/`. A subsequent upload re-uploads
+      #      them under a `-signed` suffix; the release job below picks
+      #      them up via `merge-multiple: true`.
+      #
+      # See docs/CODE_SIGNING.md for the full maintainer walkthrough.
+      #
+      # - name: Submit signing request to SignPath
+      #   if: matrix.platform == 'windows-latest' && startsWith(github.ref, 'refs/tags/') && vars.ENABLE_SIGNPATH == 'true'
+      #   id: signpath-request
+      #   uses: signpath/github-action-submit-signing-request@v1
+      #   with:
+      #     api-token: '${{ secrets.SIGNPATH_API_TOKEN }}'
+      #     organization-id: '${{ secrets.SIGNPATH_ORG_ID }}'
+      #     project-slug: 'infinity-mod-runner'
+      #     signing-policy-slug: 'release-signing'
+      #     artifact-configuration-slug: 'initial'
+      #     github-artifact-id: '${{ steps.upload-unsigned.outputs.artifact-id }}'
+      #     wait-for-completion: true
+      #     output-artifact-directory: 'artifacts-signed'
+      #
+      # - name: Upload signed Windows artifacts
+      #   if: matrix.platform == 'windows-latest' && startsWith(github.ref, 'refs/tags/') && vars.ENABLE_SIGNPATH == 'true'
+      #   uses: actions/upload-artifact@v7
+      #   with:
+      #     name: infinity-mod-runner-${{ matrix.platform }}-signed
+      #     path: artifacts-signed/
+      #     if-no-files-found: error
 
   release:
     needs: build
@@ -116,18 +165,18 @@ jobs:
         shell: bash
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          REPO="Anprionsa/eet-mod-runner"
+          REPO="Anprionsa/infinity-mod-runner"
           TAG="${GITHUB_REF_NAME}"
           DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-          NOTES="EET Mod Runner ${TAG} — see release notes for details."
+          NOTES="Infinity Mod Runner ${TAG} — see release notes for details."
 
           # Read signatures
           WIN_SIG=""
           LINUX_SIG=""
           MAC_SIG=""
 
-          if [ -f "artifacts/EET Mod Runner_${VERSION}_x64-setup.exe.sig" ]; then
-            WIN_SIG=$(cat "artifacts/EET Mod Runner_${VERSION}_x64-setup.exe.sig")
+          if [ -f "artifacts/Infinity Mod Runner_${VERSION}_x64-setup.exe.sig" ]; then
+            WIN_SIG=$(cat "artifacts/Infinity Mod Runner_${VERSION}_x64-setup.exe.sig")
           fi
           if ls artifacts/*.AppImage.sig 1>/dev/null 2>&1; then
             LINUX_SIG=$(cat artifacts/*.AppImage.sig | head -1)
@@ -145,15 +194,15 @@ jobs:
             "platforms": {
               "windows-x86_64": {
                 "signature": "${WIN_SIG}",
-                "url": "https://github.com/${REPO}/releases/download/${TAG}/EET.Mod.Runner_${VERSION}_x64-setup.exe"
+                "url": "https://github.com/${REPO}/releases/download/${TAG}/Infinity.Mod.Runner_${VERSION}_x64-setup.exe"
               },
               "linux-x86_64": {
                 "signature": "${LINUX_SIG}",
-                "url": "https://github.com/${REPO}/releases/download/${TAG}/EET.Mod.Runner_${VERSION}_amd64.AppImage"
+                "url": "https://github.com/${REPO}/releases/download/${TAG}/Infinity.Mod.Runner_${VERSION}_amd64.AppImage"
               },
               "darwin-aarch64": {
                 "signature": "${MAC_SIG}",
-                "url": "https://github.com/${REPO}/releases/download/${TAG}/EET.Mod.Runner_${VERSION}_aarch64.app.tar.gz"
+                "url": "https://github.com/${REPO}/releases/download/${TAG}/Infinity.Mod.Runner_${VERSION}_aarch64.app.tar.gz"
               }
             }
           }
@@ -166,8 +215,8 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           draft: true
-          name: "EET Mod Runner ${{ github.ref_name }}"
-          body: "See [CHANGELOG](https://github.com/Anprionsa/eet-mod-runner#changelog) for details."
+          name: "Infinity Mod Runner ${{ github.ref_name }}"
+          body: "See [CHANGELOG](https://github.com/Anprionsa/infinity-mod-runner#changelog) for details."
           files: artifacts/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

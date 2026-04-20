@@ -3,19 +3,56 @@ use std::path::Path;
 use tauri::{AppHandle, Emitter, Manager};
 
 /// Load persisted config from disk.
+///
+/// Migration: the app was renamed from "eet-mod-runner" to "infinity-mod-runner"
+/// (suite rename on 2026-04-20). On first load after the rename, if the new
+/// confy key returns a default config but the old key has real data, copy the
+/// old config over and write it to the new key. See INFINITY_RENAME_PLAN.md.
 #[tauri::command]
 pub fn load_config() -> Result<AppConfig, String> {
-    let cfg: AppConfig = confy::load("eet-mod-runner", "config")
+    let cfg: AppConfig = confy::load("infinity-mod-runner", "config")
         .map_err(|e| format!("Failed to load config: {e}"))?;
+    if cfg == AppConfig::default() {
+        if let Ok(legacy) = confy::load::<AppConfig>("eet-mod-runner", "config") {
+            if legacy != AppConfig::default() {
+                log::info!("Migrating config from eet-mod-runner to infinity-mod-runner");
+                let _ = confy::store("infinity-mod-runner", "config", &legacy);
+                return Ok(legacy);
+            }
+        }
+    }
     Ok(cfg)
 }
 
 /// Save config to disk.
+///
+/// Emits an `app:config-saved` event on success and `app:config-save-failed`
+/// on error so the frontend can surface silent persistence failures in
+/// gui.log. Historically we just returned `Err(...)` to the JS caller where
+/// it hit a `console.error` and vanished — with the event path, config
+/// write failures show up in the session log and we can catch regressions
+/// like "confy stopped writing 2 weeks ago" before the user loses another
+/// install worth of settings.
 #[tauri::command]
-pub fn save_config(config: AppConfig) -> Result<(), String> {
-    confy::store("eet-mod-runner", "config", &config)
-        .map_err(|e| format!("Failed to save config: {e}"))?;
-    Ok(())
+pub fn save_config(app: AppHandle, config: AppConfig) -> Result<(), String> {
+    match confy::store("infinity-mod-runner", "config", &config) {
+        Ok(()) => {
+            // Include the resolved path so users (and log consumers) can tell
+            // at a glance *which* file we think we wrote to.
+            let path = confy::get_configuration_file_path("infinity-mod-runner", "config")
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|_| "<path-unknown>".to_string());
+            let _ = app.emit("app:config-saved", serde_json::json!({ "path": path }));
+            Ok(())
+        }
+        Err(e) => {
+            let msg = format!("Failed to save config: {e}");
+            let _ = app.emit("app:config-save-failed", serde_json::json!({
+                "error": msg.clone(),
+            }));
+            Err(msg)
+        }
+    }
 }
 
 /// Check if a directory contains chitin.key (valid IE game dir).
@@ -44,13 +81,31 @@ pub async fn validate_game_dir(path: String) -> Result<bool, String> {
 }
 
 /// Search PATH for weidu/weidu.exe.
+///
+/// Excludes matches inside the experimental-WeiDU cache directory
+/// (`.weidu_cache/`). That cache is our private staging area for the
+/// bundled patched binary — users should never see it pointed at from
+/// Setup. A user could conceivably put the cache root on PATH or alias
+/// `weidu` to it; either way, auto-detect must not surface that path.
+/// The same marker is used in `installer/dry_run.rs` to identify the
+/// cache from the other direction.
 #[tauri::command]
 pub fn detect_weidu() -> Result<Option<String>, String> {
+    fn is_experimental_cache(path: &str) -> bool {
+        Path::new(path)
+            .components()
+            .any(|c| c.as_os_str().eq_ignore_ascii_case(".weidu_cache"))
+    }
+
     if let Ok(path) = which("weidu") {
-        return Ok(Some(path));
+        if !is_experimental_cache(&path) {
+            return Ok(Some(path));
+        }
     }
     if let Ok(path) = which("weidu.exe") {
-        return Ok(Some(path));
+        if !is_experimental_cache(&path) {
+            return Ok(Some(path));
+        }
     }
     // Check common locations per platform
     #[cfg(target_os = "windows")]
@@ -74,7 +129,7 @@ pub fn detect_weidu() -> Result<Option<String>, String> {
         paths
     };
     for p in &common_paths {
-        if Path::new(p).exists() {
+        if Path::new(p).exists() && !is_experimental_cache(p) {
             return Ok(Some(p.to_string()));
         }
     }
@@ -388,6 +443,48 @@ pub async fn check_mod_exists(mod_dir: String, game_dir: String, tp2_path: Strin
 }
 
 /// Recursively search for a file by name (case-insensitive) up to max_depth levels.
+/// Byte-level substring replacement. Used for the "replace" patch op so we can
+/// safely operate on TP2/TPA files that contain non-UTF-8 bytes (Latin-1/CP1252
+/// German ellipsis 0x85, Polish diacritics, etc.). Since our find/replace
+/// strings in patch_manifest.json are always ASCII, byte-level match is
+/// correct: ASCII bytes are invariant across UTF-8 and legacy 8-bit encodings.
+fn replace_bytes_all(haystack: &[u8], needle: &[u8], replacement: &[u8]) -> Vec<u8> {
+    if needle.is_empty() || needle.len() > haystack.len() {
+        return haystack.to_vec();
+    }
+    let mut out = Vec::with_capacity(haystack.len());
+    let mut i = 0;
+    while i + needle.len() <= haystack.len() {
+        if &haystack[i..i + needle.len()] == needle {
+            out.extend_from_slice(replacement);
+            i += needle.len();
+        } else {
+            out.push(haystack[i]);
+            i += 1;
+        }
+    }
+    out.extend_from_slice(&haystack[i..]);
+    out
+}
+
+/// Normalize CRLF to LF at the byte level, preserving non-ASCII bytes. Used by
+/// the "replace" op as a fallback when the first match attempt fails due to
+/// line-ending mismatch between the patch manifest (LF) and the on-disk file.
+fn normalize_crlf_to_lf(bytes: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if i + 1 < bytes.len() && bytes[i] == b'\r' && bytes[i + 1] == b'\n' {
+            out.push(b'\n');
+            i += 2;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    out
+}
+
 fn find_file_recursive(dir: &Path, filename: &str, max_depth: usize) -> bool {
     if max_depth == 0 || !dir.is_dir() { return false; }
     if let Ok(entries) = std::fs::read_dir(dir) {
@@ -406,8 +503,6 @@ fn find_file_recursive(dir: &Path, filename: &str, max_depth: usize) -> bool {
     }
     false
 }
-
-// ─── Old mod_installer commands removed — native installer replaces them ───
 
 /// Batch check which mods exist on disk. Much faster than individual calls.
 /// Returns a map of tp2_path → exists (true/false).
@@ -1042,38 +1137,185 @@ pub struct DebugIssue {
 fn gui_log_path() -> Result<std::path::PathBuf, String> {
     let config_dir = dirs::config_dir()
         .ok_or_else(|| "Cannot determine config directory".to_string())?;
-    let app_dir = config_dir.join("eet-mod-runner");
+    let app_dir = config_dir.join("infinity-mod-runner");
     std::fs::create_dir_all(&app_dir)
         .map_err(|e| format!("Failed to create config dir: {e}"))?;
-    Ok(app_dir.join("gui.log"))
+    Ok(app_dir.join(crate::paths::FILE_GUI_LOG))
 }
 
-/// Rotate gui.log if it's over 500KB — keeps the last ~100KB.
-/// Called once per session on first write.
-fn maybe_rotate_gui_log() {
-    static ROTATED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-    if ROTATED.swap(true, std::sync::atomic::Ordering::SeqCst) { return; }
+/// State file next to gui.log, tracking the last logged version so rotate_gui_log
+/// can detect version bumps without parsing the log itself.
+fn gui_log_state_path() -> Result<std::path::PathBuf, String> {
+    Ok(gui_log_path()?.with_file_name("gui.log.state.json"))
+}
 
-    let Ok(path) = gui_log_path() else { return };
-    let Ok(meta) = std::fs::metadata(&path) else { return };
-    if meta.len() <= 512_000 { return; } // 500KB threshold
+const GUI_LOG_SIZE_CAP: u64 = 5 * 1024 * 1024; // 5 MB
+const GUI_LOG_NUMBERED_MAX: u32 = 3;            // gui.log.1, .2, .3
+const GUI_LOG_TOTAL_CAP: usize = 10;            // hard cap across all generations
 
-    // Keep last ~100KB of content
-    if let Ok(content) = std::fs::read_to_string(&path) {
-        let keep_from = content.len().saturating_sub(100_000);
-        // Find the next newline after keep_from to avoid cutting mid-line
-        let start = content[keep_from..].find('\n').map(|i| keep_from + i + 1).unwrap_or(keep_from);
-        let trimmed = format!("--- Log rotated (kept last {}KB of {}KB) ---\n{}",
-            (content.len() - start) / 1024, content.len() / 1024, &content[start..]);
-        let _ = std::fs::write(&path, trimmed);
-    }
+/// Result of rotate_gui_log: rotated/reason/prev_file for a SESSION-START line,
+/// plus optional health warnings that surface silent failures from a previous
+/// session (e.g. frontend crashed before calling rotate, so gui.log grew past
+/// the size cap without being rotated).
+#[derive(serde::Serialize)]
+pub struct GuiLogRotateResult {
+    pub rotated: bool,
+    pub reason: String,
+    pub prev_file: Option<String>,
+    /// Non-empty if the pre-rotation state of gui.log looked unhealthy.
+    /// Frontend surfaces these as WARN log lines.
+    pub health_warnings: Vec<String>,
+}
+
+/// Rotate `gui.log` on app startup. Idempotent per process: the first call per
+/// session does the work, subsequent calls are no-ops so background writes during
+/// the same session don't trigger additional rotations.
+///
+/// Rules, evaluated in this order:
+///   1. If the app version differs from the last-logged version → rename
+///      `gui.log` → `gui.log.prev-<old_version>` and start fresh.
+///   2. Otherwise, if `gui.log` > 5 MB → shift `gui.log.2→3`, `.1→2`, `.0→.1`,
+///      move `gui.log → gui.log.1`. Keep 3 numbered generations.
+///   3. Otherwise → nothing.
+///
+/// After rotating, sweep `gui.log.prev-*` files if the total count across all
+/// generations exceeds `GUI_LOG_TOTAL_CAP`. Oldest-mtime prev files go first.
+#[tauri::command]
+pub async fn rotate_gui_log(current_version: String) -> Result<GuiLogRotateResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        static ROTATED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if ROTATED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return Ok(GuiLogRotateResult {
+                rotated: false, reason: "already rotated this session".into(),
+                prev_file: None, health_warnings: Vec::new(),
+            });
+        }
+
+        let log_path = gui_log_path()?;
+        let state_path = gui_log_state_path()?;
+        let log_dir = log_path.parent()
+            .ok_or_else(|| "gui.log has no parent dir".to_string())?
+            .to_path_buf();
+
+        // Load previous state
+        let prev_version: Option<String> = std::fs::read_to_string(&state_path)
+            .ok()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .and_then(|v| v.get("last_version").and_then(|x| x.as_str()).map(String::from));
+
+        let log_exists = log_path.exists();
+        let log_size = std::fs::metadata(&log_path).map(|m| m.len()).unwrap_or(0);
+
+        // ── Health observations (pre-rotation state of previous session) ──
+        // The whole point of this block is to catch cases where the PREVIOUS
+        // session failed to rotate — e.g. the frontend crashed before calling
+        // `rotate_gui_log`. We don't act on these here (rotation still runs
+        // normally below); we just record them so the frontend can surface a
+        // WARN. If a warning recurs across launches, that's the signal we want.
+        let mut health_warnings: Vec<String> = Vec::new();
+
+        // H1: gui.log exceeds the size cap by a meaningful margin (2×) despite
+        //     the previous session presumably having had a chance to rotate.
+        //     The normal size-cap rotation rule below will handle it; we just
+        //     note that it happened for visibility.
+        if log_exists && log_size > GUI_LOG_SIZE_CAP * 2 {
+            health_warnings.push(format!(
+                "gui.log was {:.1} MB at startup (>2× cap) — previous session likely did not call rotate_gui_log",
+                log_size as f64 / 1_048_576.0
+            ));
+        }
+
+        // H2: state file missing but gui.log is large enough that we'd have
+        //     expected at least one rotation to have written the state. Implies
+        //     the frontend has never successfully called rotate_gui_log.
+        if log_exists && log_size > GUI_LOG_SIZE_CAP && !state_path.exists() {
+            health_warnings.push(
+                "gui.log.state.json missing despite gui.log exceeding size cap — frontend may never have successfully completed a rotate_gui_log call".to_string()
+            );
+        }
+
+        // H3: orphan numbered generations beyond GUI_LOG_NUMBERED_MAX that we'd
+        //     never create ourselves — something external wrote them, or older
+        //     code left them behind. Purely informational.
+        let orphan_count = (GUI_LOG_NUMBERED_MAX + 1..=20)
+            .filter(|i| log_dir.join(format!("gui.log.{i}")).exists())
+            .count();
+        if orphan_count > 0 {
+            health_warnings.push(format!(
+                "found {orphan_count} orphan gui.log.N files beyond generation {GUI_LOG_NUMBERED_MAX} — safe to delete manually"
+            ));
+        }
+
+        let mut result = GuiLogRotateResult {
+            rotated: false, reason: String::new(), prev_file: None,
+            health_warnings,
+        };
+
+        // Rule 1: version bump
+        if log_exists && prev_version.as_deref().is_some_and(|v| v != current_version) {
+            let old_ver = prev_version.as_deref().unwrap_or("unknown");
+            let safe_ver = old_ver.replace(|c: char| !c.is_ascii_alphanumeric() && c != '.' && c != '-', "_");
+            let target = log_dir.join(format!("gui.log.prev-{safe_ver}"));
+            let _ = std::fs::rename(&log_path, &target);
+            result.rotated = true;
+            result.reason = format!("version bump {old_ver} → {current_version}");
+            result.prev_file = Some(target.file_name().and_then(|s| s.to_str()).unwrap_or("").to_string());
+        }
+        // Rule 2: size cap
+        else if log_exists && log_size > GUI_LOG_SIZE_CAP {
+            // Shift existing numbered gens: drop .N, shift N-1→N, …, 1→2
+            let drop_path = log_dir.join(format!("gui.log.{GUI_LOG_NUMBERED_MAX}"));
+            let _ = std::fs::remove_file(&drop_path);
+            for i in (1..GUI_LOG_NUMBERED_MAX).rev() {
+                let from = log_dir.join(format!("gui.log.{i}"));
+                let to = log_dir.join(format!("gui.log.{}", i + 1));
+                if from.exists() { let _ = std::fs::rename(&from, &to); }
+            }
+            // Move current gui.log → gui.log.1
+            let one = log_dir.join("gui.log.1");
+            let _ = std::fs::rename(&log_path, &one);
+            result.rotated = true;
+            result.reason = format!("size cap {:.1} MB > 5 MB", log_size as f64 / 1_048_576.0);
+            result.prev_file = Some("gui.log.1".to_string());
+        }
+
+        // Persist the new version stamp
+        let new_state = serde_json::json!({ "last_version": current_version });
+        let _ = std::fs::write(&state_path, serde_json::to_string_pretty(&new_state).unwrap_or_default());
+
+        // Total-cap cleanup: if (numbered + prev-*) > GUI_LOG_TOTAL_CAP, remove oldest prev-* files.
+        if let Ok(entries) = std::fs::read_dir(&log_dir) {
+            let mut prev_files: Vec<(std::path::PathBuf, std::time::SystemTime)> = entries
+                .filter_map(|e| e.ok())
+                .filter(|e| {
+                    e.file_name().to_string_lossy().starts_with("gui.log.prev-")
+                })
+                .filter_map(|e| e.metadata().ok().and_then(|m| m.modified().ok()).map(|t| (e.path(), t)))
+                .collect();
+
+            let numbered_count = (1..=GUI_LOG_NUMBERED_MAX)
+                .filter(|i| log_dir.join(format!("gui.log.{i}")).exists())
+                .count();
+            let total = prev_files.len() + numbered_count;
+            if total > GUI_LOG_TOTAL_CAP {
+                let to_drop = total - GUI_LOG_TOTAL_CAP;
+                prev_files.sort_by_key(|(_, t)| *t);
+                for (p, _) in prev_files.into_iter().take(to_drop) {
+                    let _ = std::fs::remove_file(&p);
+                }
+            }
+        }
+
+        Ok(result)
+    }).await.map_err(|e| e.to_string())?
 }
 
 /// Append an entry to gui.log. Timestamp provided by the frontend (ISO format).
+/// Rotation happens exclusively via `rotate_gui_log` on startup — no inline rotation
+/// from the write path.
 #[tauri::command]
 pub fn gui_log(timestamp: String, level: String, category: String, message: String) -> Result<(), String> {
     use std::io::Write;
-    maybe_rotate_gui_log();
     let path = gui_log_path()?;
     let mut file = std::fs::OpenOptions::new()
         .create(true)
@@ -1135,12 +1377,12 @@ fn which(name: &str) -> Result<String, ()> {
 
 // ─── Download Plan Cache ───
 
-/// Write a filtered WeiDU.log to a temp file for mod_installer.
+/// Write a filtered WeiDU.log to a temp file.
 /// Used when the user has excluded components from the install order.
 #[tauri::command]
 pub async fn write_temp_log(content: String, filename: String) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let temp_dir = std::env::temp_dir().join("eet-mod-runner");
+        let temp_dir = std::env::temp_dir().join("infinity-mod-runner");
         std::fs::create_dir_all(&temp_dir)
             .map_err(|e| format!("Failed to create temp dir: {e}"))?;
         let path = temp_dir.join(&filename);
@@ -1154,7 +1396,7 @@ pub async fn write_temp_log(content: String, filename: String) -> Result<String,
 fn download_cache_path() -> Result<std::path::PathBuf, String> {
     let config_dir = dirs::config_dir()
         .ok_or_else(|| "Cannot determine config directory".to_string())?;
-    let app_dir = config_dir.join("eet-mod-runner");
+    let app_dir = config_dir.join("infinity-mod-runner");
     std::fs::create_dir_all(&app_dir)
         .map_err(|e| format!("Failed to create config dir: {e}"))?;
     Ok(app_dir.join("download_cache.json"))
@@ -1253,11 +1495,34 @@ pub struct NativeInstallArgs {
     pub abort_on_warnings: bool,
     pub weidu_log_mode: String,
     pub max_batch_size: Option<usize>,
+    /// Heavy-mod batch size override. When None, falls back to
+    /// `installer::FORCE_SMALL_BATCH_SIZE` (3). Values >3 are experimental —
+    /// some heavy mods segfault WeiDU with larger batches.
+    pub heavy_batch_size: Option<usize>,
     pub pause_points: Vec<PausePointArg>,
     pub bcs_scanner: Option<bool>,
     pub auto_skip_after_retry: Option<bool>,
     pub suppress_readmes: Option<bool>,
     pub data_directory: Option<String>,
+    pub pause_on_guard: Option<bool>,
+    /// Redirect override/ to a fast drive for the install. Off by default.
+    pub override_fast_drive: Option<bool>,
+    /// Target path for the override redirect (e.g. `R:\\` for a RAM disk).
+    /// Must be on a different volume than the game for any benefit.
+    pub override_fast_drive_path: Option<String>,
+    /// If true (default), the pre-biff optimization deletes original files
+    /// from override/ after MAKE_BIFF succeeds. The original behavior kept
+    /// them there, which meant MAKE_BIFF had no effect on WeiDU's iteration
+    /// cost — override/ stayed at ~122k files on a megainstall, and SFO-
+    /// heavy mods walked all of them. With cleanup on, override/ drops to
+    /// a few dozen files post-BIFF. Defaults to true on new installs.
+    ///
+    /// Precedence order: install_config.json's top-level
+    /// `enable_biff_delete_optimization` wins over this UI value when set
+    /// (so the A/B test harness can pin the flag from JSON alone). If
+    /// install_config.json doesn't set it, the UI/default value here
+    /// applies.
+    pub enable_biff_delete_optimization: Option<bool>,
 }
 
 #[derive(serde::Deserialize)]
@@ -1268,8 +1533,8 @@ pub struct PausePointArg {
     pub phase: String,
 }
 
-/// Start a native EET install — replaces mod_installer entirely.
-/// Runs in a background thread, streaming events to the GUI.
+/// Start a native EET install. Runs in a background thread, streaming
+/// events to the GUI.
 #[tauri::command]
 pub async fn start_native_install(
     app: AppHandle,
@@ -1295,6 +1560,15 @@ pub async fn start_native_install(
         post_copy_delay_ms: 0, // sync_all() handles flush; delay only needed for network drives
         ocamlrunparam: "s=16M,o=500,O=1000000".to_string(),
         bcs_scanner: args.bcs_scanner.unwrap_or(false),
+        // Populated from RuntimeConfig below; defaults here just so the struct
+        // is constructible before that override lands.
+        force_small_batch_mods: crate::installer::FORCE_SMALL_BATCH_MODS.iter().map(|s| s.to_string()).collect(),
+        // Frontend-driven override; falls back to the compile-time default
+        // (3) when the user hasn't touched the setting.
+        force_small_batch_size: args.heavy_batch_size.unwrap_or(crate::installer::FORCE_SMALL_BATCH_SIZE),
+        // Populated from RuntimeConfig immediately after construction.
+        per_mod_timeout_secs: std::collections::HashMap::new(),
+        force_single_cn_mods: std::collections::HashMap::new(),
         auto_skip_after_retry: args.auto_skip_after_retry.unwrap_or(false),
         suppress_readmes: args.suppress_readmes.unwrap_or(true),
         sibling_directories: std::collections::HashMap::new(),
@@ -1305,6 +1579,10 @@ pub async fn start_native_install(
         tlk_prewarm: true,
         tlk_fast_drive: false,
         tlk_fast_drive_path: None,
+        override_fast_drive: args.override_fast_drive.unwrap_or(false),
+        override_fast_drive_path: args.override_fast_drive_path.clone(),
+        pause_on_guard: args.pause_on_guard.unwrap_or(false),
+        enable_biff_delete_optimization: args.enable_biff_delete_optimization.unwrap_or(true),
     };
 
     // Load runtime config (readln defaults, etc.) from bundled install_config.json
@@ -1314,6 +1592,26 @@ pub async fn start_native_install(
         config.readln_fallback = rt.readln_fallback;
         config.readln_timeout_secs = rt.readln_timeout_secs;
         config.sibling_directories = rt.sibling_directories.clone();
+        config.force_small_batch_mods = rt.force_small_batch_mods;
+        // Precedence: UI setting (args.heavy_batch_size) wins over
+        // install_config.json's force_small_batch_size. Without this guard,
+        // a user who cranked Heavy batch size to 10 in the Install tab
+        // would get silently reverted to the JSON default — exactly what
+        // happened to the 11.6h install, where heavy=10 was set in the UI
+        // and immediately clobbered to 3 right before the batch planner
+        // ran. RuntimeConfig still wins when the UI hasn't passed a value
+        // (i.e. programmatic callers / legacy paths).
+        if args.heavy_batch_size.is_none() {
+            config.force_small_batch_size = rt.force_small_batch_size;
+        }
+        config.per_mod_timeout_secs = rt.per_mod_timeout_secs;
+        config.force_single_cn_mods = rt.force_single_cn_mods;
+        // Precedence for the BIFF-delete A/B toggle: install_config.json
+        // wins over whatever the UI passed. This lets the A/B harness pin
+        // the variant from JSON alone — no UI toggling between runs.
+        if let Some(v) = rt.enable_biff_delete_optimization {
+            config.enable_biff_delete_optimization = v;
+        }
     }
 
     let pause_points: Vec<PausePoint> = args.pause_points.iter().map(|p| PausePoint {
@@ -1359,6 +1657,13 @@ pub async fn start_dry_run(
         post_copy_delay_ms: 0,
         ocamlrunparam: String::new(),
         bcs_scanner: false,
+        force_small_batch_mods: crate::installer::FORCE_SMALL_BATCH_MODS.iter().map(|s| s.to_string()).collect(),
+        // Same override as start_native_install — the dry run must honour the
+        // user's heavy_batch_size setting so batch/timing estimates reflect
+        // what the real install will do.
+        force_small_batch_size: args.heavy_batch_size.unwrap_or(crate::installer::FORCE_SMALL_BATCH_SIZE),
+        per_mod_timeout_secs: std::collections::HashMap::new(),
+        force_single_cn_mods: std::collections::HashMap::new(),
         auto_skip_after_retry: false,
         suppress_readmes: true,
         sibling_directories: std::collections::HashMap::new(),
@@ -1369,6 +1674,10 @@ pub async fn start_dry_run(
         tlk_prewarm: true,
         tlk_fast_drive: false,
         tlk_fast_drive_path: None,
+        override_fast_drive: args.override_fast_drive.unwrap_or(false),
+        override_fast_drive_path: args.override_fast_drive_path.clone(),
+        pause_on_guard: args.pause_on_guard.unwrap_or(false),
+        enable_biff_delete_optimization: args.enable_biff_delete_optimization.unwrap_or(true),
     };
 
     if let Ok(exe_dir) = std::env::current_exe().and_then(|p| Ok(p.parent().unwrap_or(std::path::Path::new(".")).to_path_buf())) {
@@ -1377,6 +1686,24 @@ pub async fn start_dry_run(
         config.readln_fallback = rt.readln_fallback;
         config.readln_timeout_secs = rt.readln_timeout_secs;
         config.sibling_directories = rt.sibling_directories.clone();
+        config.force_small_batch_mods = rt.force_small_batch_mods;
+        // See start_native_install for the same guard: UI setting wins over
+        // install_config.json. Without this, a dry run with heavy=10 in the
+        // UI would still project batch counts at heavy=3 (19 batches for
+        // dw_talents instead of 8) — which is exactly what was happening
+        // and why the heavy-batch feature looked dead despite the full
+        // UI → IPC wiring being correct end-to-end.
+        if args.heavy_batch_size.is_none() {
+            config.force_small_batch_size = rt.force_small_batch_size;
+        }
+        config.per_mod_timeout_secs = rt.per_mod_timeout_secs;
+        config.force_single_cn_mods = rt.force_single_cn_mods;
+        // Mirrors start_native_install: install_config.json's BIFF toggle
+        // wins over UI. Dry run honours it too so the plan preview matches
+        // what the real install will do.
+        if let Some(v) = rt.enable_biff_delete_optimization {
+            config.enable_biff_delete_optimization = v;
+        }
     }
 
     let eet_log = std::path::PathBuf::from(&args.eet_log_path);
@@ -1427,6 +1754,99 @@ pub fn install_send_input(text: String) -> Result<(), String> {
     crate::installer::runner::send_input(&text)
 }
 
+/// Test junction/symlink creation capability in a game directory.
+/// Creates a temporary `.eetmr_junction_test` junction to `override/`,
+/// removes it, and reports success/failure. Used by Ready Check to
+/// catch environments where junctions are blocked (e.g. OneDrive-synced
+/// folders, Dev Drives without elevation, exotic filesystems).
+#[tauri::command]
+pub fn test_junction_capability(game_dir: String) -> JunctionTestResult {
+    let path = std::path::Path::new(&game_dir);
+    let test_dir = path.join(".eetmr_junction_test");
+    let test_target = path.join("override");
+
+    if !test_target.exists() {
+        return JunctionTestResult {
+            ok: false,
+            error: Some("override/ directory not found — is this a valid game dir?".to_string()),
+        };
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::fs::symlink_dir;
+        if symlink_dir(&test_target, &test_dir).is_ok() {
+            let _ = std::fs::remove_dir(&test_dir);
+            return JunctionTestResult { ok: true, error: None };
+        }
+        // Fall back to cmd mklink /J (which doesn't require elevation)
+        use std::os::windows::process::CommandExt;
+        let result = std::process::Command::new("cmd")
+            .args(["/c", "mklink", "/J",
+                &test_dir.to_string_lossy(),
+                &test_target.to_string_lossy()])
+            .creation_flags(0x08000000)
+            .output();
+        match result {
+            Ok(output) if output.status.success() => {
+                let _ = std::fs::remove_dir(&test_dir);
+                JunctionTestResult { ok: true, error: None }
+            }
+            Ok(output) => JunctionTestResult {
+                ok: false,
+                error: Some(format!("mklink /J failed: {}",
+                    String::from_utf8_lossy(&output.stderr).trim())),
+            },
+            Err(e) => JunctionTestResult { ok: false, error: Some(format!("cmd failed: {e}")) },
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        match std::os::unix::fs::symlink(&test_target, &test_dir) {
+            Ok(_) => {
+                let _ = std::fs::remove_file(&test_dir);
+                JunctionTestResult { ok: true, error: None }
+            }
+            Err(e) => JunctionTestResult { ok: false, error: Some(format!("symlink failed: {e}")) },
+        }
+    }
+}
+
+/// Query free disk space on each of the configured directories in one
+/// roundtrip so Ready Check doesn't need three separate invokes.
+/// Any directory that fails lookup returns 0 for that slot; frontend treats
+/// 0 as "unknown" and skips the check silently.
+#[tauri::command]
+pub fn check_disk_spaces(
+    game_dir: String,
+    data_dir: String,
+    mod_dir: String,
+) -> DiskSpaceReport {
+    DiskSpaceReport {
+        game_free: fs2::available_space(std::path::Path::new(&game_dir)).unwrap_or(0),
+        data_free: fs2::available_space(std::path::Path::new(&data_dir)).unwrap_or(0),
+        mod_free: fs2::available_space(std::path::Path::new(&mod_dir)).unwrap_or(0),
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JunctionTestResult {
+    pub ok: bool,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiskSpaceReport {
+    /// Bytes free on the volume hosting the game directory.
+    pub game_free: u64,
+    /// Bytes free on the volume hosting the data/backup directory.
+    pub data_free: u64,
+    /// Bytes free on the volume hosting the mod/Extracted directory.
+    pub mod_free: u64,
+}
+
 /// Check if a previous install was interrupted (crash recovery).
 /// Returns the checkpoint data if found, null otherwise.
 #[tauri::command]
@@ -1441,12 +1861,18 @@ pub fn check_install_checkpoint(game_dir: String, data_directory: Option<String>
         max_batch_size: 25, skip_installed: true, timeout_secs: 7200,
         weidu_log_mode: String::new(), never_abort: false, abort_on_warnings: false,
         post_copy_delay_ms: 0, ocamlrunparam: String::new(),
-        bcs_scanner: false, auto_skip_after_retry: false, suppress_readmes: true,
+        bcs_scanner: false,
+        force_small_batch_mods: Vec::new(), force_small_batch_size: 3,
+        per_mod_timeout_secs: std::collections::HashMap::new(),
+        force_single_cn_mods: std::collections::HashMap::new(),
+        auto_skip_after_retry: false, suppress_readmes: true,
         sibling_directories: std::collections::HashMap::new(),
         readln_defaults: std::collections::HashMap::new(),
         readln_fallback: String::new(), readln_timeout_secs: 30,
         data_directory,
         tlk_prewarm: true, tlk_fast_drive: false, tlk_fast_drive_path: None,
+        override_fast_drive: false, override_fast_drive_path: None,
+        pause_on_guard: false, enable_biff_delete_optimization: false,
     };
     let data_dir = crate::installer::resolve_data_dir(&config);
     // Also check old location for migration
@@ -1458,6 +1884,13 @@ pub fn check_install_checkpoint(game_dir: String, data_directory: Option<String>
 /// Abort the native install (graceful → force kill).
 #[tauri::command]
 pub fn abort_native_install() -> Result<(), String> {
+    // Emit into install.log before flipping the flag so the event lands
+    // before any downstream [ABORT_SKIP]/[FATAL_SKIP] from batches mid-flight.
+    // Idempotent: if no install is running the event no-ops.
+    crate::installer::install_log::log_active_event(
+        "USER_ABORT",
+        "requested from GUI — install will halt after current batch completes",
+    );
     NATIVE_INSTALL_STATE.abort_flag.store(true, std::sync::atomic::Ordering::SeqCst);
     crate::installer::runner::abort_weidu()
 }
@@ -1465,23 +1898,47 @@ pub fn abort_native_install() -> Result<(), String> {
 // ─── Pre-Install Patcher ───
 
 #[derive(serde::Deserialize)]
-struct PatchManifestEntry {
-    id: u32,
-    name: String,
-    description: String,
-    target_mod: Option<String>,
-    trigger: serde_json::Value,
-    marker: serde_json::Value,
-    ops: Vec<serde_json::Value>,
+pub(crate) struct PatchManifestEntry {
+    pub(crate) id: u32,
+    pub(crate) name: String,
+    #[allow(dead_code)]
+    pub(crate) description: String,
+    pub(crate) target_mod: Option<String>,
+    pub(crate) trigger: serde_json::Value,
+    pub(crate) marker: serde_json::Value,
+    #[allow(dead_code)]
+    pub(crate) ops: Vec<serde_json::Value>,
+    /// Defaults to true when missing — keeps existing manifest entries auto-selected.
+    /// Set false in the manifest for patches that change behavior some users may want
+    /// to opt out of (e.g., aggressive workarounds, experimental fixes).
+    #[serde(default = "default_true")]
+    #[allow(dead_code)]
+    pub(crate) recommended: bool,
+    /// Category for grouping and visual triage in the UI.
+    /// Valid values: "required" | "bugfix" | "compat" | "performance" | "cosmetic".
+    /// Missing entries default to "bugfix" — that's what most of the manifest is.
+    #[serde(default = "default_category")]
+    pub(crate) category: String,
 }
 
+fn default_true() -> bool { true }
+fn default_category() -> String { "bugfix".to_string() }
+
 #[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PatchStatus {
     pub id: u32,
     pub name: String,
     pub description: String,
     pub target_mod: Option<String>,
     pub status: String,  // "applicable", "already_patched", "not_needed"
+    /// True if this patch is recommended-on-by-default for new users. False for opinionated
+    /// or experimental patches that touch behavior some users want to keep. Frontend uses
+    /// this to set the initial checkbox state in the per-patch selection UI.
+    pub recommended: bool,
+    /// Category for UI grouping — surfaced from the manifest. Values:
+    /// "required" | "bugfix" | "compat" | "performance" | "cosmetic".
+    pub category: String,
 }
 
 #[derive(serde::Serialize)]
@@ -1492,7 +1949,7 @@ pub struct PatchResult {
     pub error: Option<String>,
 }
 
-fn load_manifest(resource_dir: &Path) -> Result<Vec<PatchManifestEntry>, String> {
+pub(crate) fn load_manifest(resource_dir: &Path) -> Result<Vec<PatchManifestEntry>, String> {
     let manifest_path = resource_dir.join("patches").join("patch_manifest.json");
     let contents = std::fs::read_to_string(&manifest_path)
         .map_err(|e| format!("Failed to read patch manifest: {e}"))?;
@@ -1505,7 +1962,7 @@ fn load_manifest(resource_dir: &Path) -> Result<Vec<PatchManifestEntry>, String>
 /// from each tp2's parent directory.
 /// E.g., finds `Extracted/Artisans Kitpack/ArtisansKitpack/ArtisansKitpack.TP2`
 ///   → maps "artisanskitpack" → "Extracted/Artisans Kitpack/ArtisansKitpack"
-fn build_mod_location_map(mod_dir: &Path) -> std::collections::HashMap<String, std::path::PathBuf> {
+pub(crate) fn build_mod_location_map(mod_dir: &Path) -> std::collections::HashMap<String, std::path::PathBuf> {
     let mut map = std::collections::HashMap::<String, (std::path::PathBuf, usize)>::new();
 
     fn scan(dir: &Path, map: &mut std::collections::HashMap<String, (std::path::PathBuf, usize)>, depth: usize, current_depth: usize) {
@@ -1572,7 +2029,47 @@ fn resolve_mod_path_with_map(
     None
 }
 
-fn check_trigger(
+/// Like `resolve_mod_path_with_map` but returns the constructed path EVEN IF the file
+/// doesn't exist. Used by ops (rename_if_exists, copy_if_missing) that legitimately
+/// operate on missing files — they need the correct path resolved by mod-prefix lookup
+/// regardless of whether the file is currently there.
+///
+/// Resolution priority:
+///   1. `mod_dir/rel_path` if it exists (fast path)
+///   2. `mod_locations[prefix]/rest_of_path` if the prefix is in the map (existence not required)
+///   3. `mod_dir/rel_path` as fallback (literal join — last resort)
+///
+/// The bug we're fixing: previously this returned None for missing files and callers
+/// fell back to a literal `mod_dir.join(src)` which used the wrong directory name
+/// (e.g. `Extracted/DSotSC/...` instead of `Extracted/Dark Side Of The Sword Coast/DSotSC/...`).
+/// rename_if_exists then succeeded but operated on a non-existent path, creating files
+/// in a sibling directory and leaving the actual mod folder broken.
+fn resolve_mod_path_for_io(
+    mod_dir: &Path,
+    rel_path: &str,
+    mod_locations: &std::collections::HashMap<String, std::path::PathBuf>,
+) -> std::path::PathBuf {
+    if let Some(p) = resolve_mod_path_with_map(mod_dir, rel_path, mod_locations) {
+        return p;
+    }
+    // File doesn't exist at the resolved path, but the mod prefix may still be in the map.
+    // Construct the path under the actual mod dir so callers operate on the right location.
+    let normalized = rel_path.replace('\\', "/");
+    let first_seg = normalized.split('/').next().unwrap_or(&normalized);
+    let rest = if normalized.contains('/') { &normalized[first_seg.len() + 1..] } else { "" };
+    if let Some(actual_mod_dir) = mod_locations.get(&first_seg.to_lowercase()) {
+        return if rest.is_empty() {
+            actual_mod_dir.to_path_buf()
+        } else {
+            actual_mod_dir.join(rest)
+        };
+    }
+    // Truly unknown prefix — fall back to literal join. Caller's op will likely fail
+    // (file doesn't exist + we don't know where the mod lives), which is the right outcome.
+    mod_dir.join(rel_path)
+}
+
+pub(crate) fn check_trigger(
     mod_dir: &Path,
     game_dir: &Path,
     trigger: &serde_json::Value,
@@ -1588,7 +2085,7 @@ fn check_trigger(
     }
 }
 
-fn check_marker(
+pub(crate) fn check_marker(
     mod_dir: &Path,
     game_dir: &Path,
     marker: &serde_json::Value,
@@ -1597,14 +2094,36 @@ fn check_marker(
     let invert = marker.get("invert").and_then(|v| v.as_bool()).unwrap_or(false);
 
     if let Some(file) = marker.get("file").and_then(|v| v.as_str()) {
+        // md5 marker — strongest form, detects per-version exactly
+        if let Some(expected_md5) = marker.get("md5").and_then(|v| v.as_str()) {
+            let filepath = resolve_mod_path_with_map(mod_dir, file, mod_locations)
+                .unwrap_or_else(|| mod_dir.join(file));
+            if !filepath.exists() {
+                return if invert { true } else { false };
+            }
+            let bytes = match std::fs::read(&filepath) {
+                Ok(b) => b,
+                Err(_) => return false,
+            };
+            let actual = format!("{:x}", md5::compute(&bytes));
+            let found = actual.eq_ignore_ascii_case(expected_md5);
+            return if invert { !found } else { found };
+        }
         if marker.get("text").is_none() || marker.get("text").unwrap().is_null() {
-            if let Some(check_dir) = marker.get("check_dir").and_then(|v| v.as_str()) {
-                return resolve_mod_path_with_map(mod_dir, check_dir, mod_locations).is_some();
-            }
-            if let Some(check_game) = marker.get("check_game_file").and_then(|v| v.as_str()) {
-                return game_dir.join(check_game).exists();
-            }
-            return resolve_mod_path_with_map(mod_dir, file, mod_locations).is_some();
+            // Bare file-exists marker: resolve against mod_dir / check_dir / check_game.
+            // BUG-FIX (invert-flag): early returns here used to drop the `invert` flag,
+            // so `{"file": X, "invert": true}` markers silently behaved as non-inverted —
+            // meaning a patch that should apply when the file still exists would be
+            // reported as already-applied and skipped. See patch #57 (imoen_forever
+            // marker clear).
+            let found = if let Some(check_dir) = marker.get("check_dir").and_then(|v| v.as_str()) {
+                resolve_mod_path_with_map(mod_dir, check_dir, mod_locations).is_some()
+            } else if let Some(check_game) = marker.get("check_game_file").and_then(|v| v.as_str()) {
+                game_dir.join(check_game).exists()
+            } else {
+                resolve_mod_path_with_map(mod_dir, file, mod_locations).is_some()
+            };
+            return if invert { !found } else { found };
         }
         let text = marker.get("text").and_then(|v| v.as_str()).unwrap_or("");
         let filepath = resolve_mod_path_with_map(mod_dir, file, mod_locations)
@@ -1622,28 +2141,27 @@ fn check_marker(
         let found = contents.contains(text);
         if invert { !found } else { found }
     } else {
-        if let Some(check_dir) = marker.get("check_dir").and_then(|v| v.as_str()) {
-            return resolve_mod_path_with_map(mod_dir, check_dir, mod_locations).is_some();
-        }
-        if let Some(check_game) = marker.get("check_game_file").and_then(|v| v.as_str()) {
-            return game_dir.join(check_game).exists();
-        }
-        if let Some(check_game_dir) = marker.get("check_game_dir").and_then(|v| v.as_str()) {
-            return game_dir.join(check_game_dir).is_dir();
-        }
-        // Check if a game file contains a specific string
-        if let Some(obj) = marker.get("check_game_file_contains") {
+        // Marker without `file`: check_dir / check_game_file / check_game_dir /
+        // check_game_file_contains. Same invert-flag bug as the `file` branch —
+        // early returns dropped `invert`. Now honored across all sub-cases.
+        let found = if let Some(check_dir) = marker.get("check_dir").and_then(|v| v.as_str()) {
+            resolve_mod_path_with_map(mod_dir, check_dir, mod_locations).is_some()
+        } else if let Some(check_game) = marker.get("check_game_file").and_then(|v| v.as_str()) {
+            game_dir.join(check_game).exists()
+        } else if let Some(check_game_dir) = marker.get("check_game_dir").and_then(|v| v.as_str()) {
+            game_dir.join(check_game_dir).is_dir()
+        } else if let Some(obj) = marker.get("check_game_file_contains") {
             let file = obj.get("file").and_then(|v| v.as_str()).unwrap_or("");
             let text = obj.get("text").and_then(|v| v.as_str()).unwrap_or("");
             let filepath = game_dir.join(file);
-            if filepath.exists() {
-                if let Ok(contents) = std::fs::read_to_string(&filepath) {
-                    return contents.contains(text);
-                }
+            match std::fs::read_to_string(&filepath) {
+                Ok(contents) => contents.contains(text),
+                Err(_) => false,
             }
-            return false;
-        }
-        false
+        } else {
+            false
+        };
+        if invert { !found } else { found }
     }
 }
 
@@ -1668,8 +2186,7 @@ fn apply_patch_ops(
                 let dest = op.get("dest").and_then(|v| v.as_str())
                     .ok_or("copy op missing dest")?;
                 let src_path = files_dir.join(src);
-                let dest_path = resolve_mod_path_with_map(mod_dir, dest, mod_locations)
-                    .unwrap_or_else(|| mod_dir.join(dest));
+                let dest_path = resolve_mod_path_for_io(mod_dir, dest, mod_locations);
                 if let Some(parent) = dest_path.parent() {
                     std::fs::create_dir_all(parent)
                         .map_err(|e| format!("mkdir failed for {}: {e}", parent.display()))?;
@@ -1684,26 +2201,52 @@ fn apply_patch_ops(
                     .ok_or("replace op missing find")?;
                 let replace_str = op.get("replace").and_then(|v| v.as_str())
                     .ok_or("replace op missing replace")?;
-                let filepath = resolve_mod_path_with_map(mod_dir, file, mod_locations)
-                    .unwrap_or_else(|| mod_dir.join(file));
-                let contents = std::fs::read_to_string(&filepath)
+                // `required` defaults to true — failing the find aborts the patch.
+                // Set `"required": false` on ops that may no-op safely (e.g. a fix that
+                // was already applied by a previous patch version).
+                let required = op.get("required").and_then(|v| v.as_bool()).unwrap_or(true);
+                let filepath = resolve_mod_path_for_io(mod_dir, file, mod_locations);
+                // Read as bytes — TP2/TPA files may contain Latin-1/Windows-1252 bytes
+                // (e.g. German translation strings with 0x85 ellipsis). Our find/replace
+                // strings are ASCII, and ASCII bytes are identical across UTF-8 and
+                // Latin-1/CP1252, so byte-level replacement preserves non-ASCII bytes
+                // untouched while doing the substitution correctly.
+                let contents = std::fs::read(&filepath)
                     .map_err(|e| format!("read failed {}: {e}", filepath.display()))?;
-                let new_contents = contents.replace(find, replace_str);
+                let find_bytes = find.as_bytes();
+                let replace_bytes = replace_str.as_bytes();
+                let new_contents = replace_bytes_all(&contents, find_bytes, replace_bytes);
                 if new_contents == contents {
-                    // Find text not found — check if it's a line-ending mismatch
-                    let find_normalized = find.replace("\r\n", "\n");
-                    let contents_normalized = contents.replace("\r\n", "\n");
-                    let normalized_result = contents_normalized.replace(&find_normalized, replace_str);
+                    // Find bytes not found — check for line-ending mismatch (\r\n vs \n)
+                    let find_normalized: Vec<u8> = find.replace("\r\n", "\n").into_bytes();
+                    let contents_normalized = normalize_crlf_to_lf(&contents);
+                    let normalized_result =
+                        replace_bytes_all(&contents_normalized, &find_normalized, replace_bytes);
                     if normalized_result != contents_normalized {
-                        // Line-ending mismatch — write with normalized content
                         std::fs::write(&filepath, &normalized_result)
                             .map_err(|e| format!("write failed {}: {e}", filepath.display()))?;
-                    } else {
+                    } else if required {
                         return Err(format!("find text not found in {}", filepath.display()));
                     }
+                    // else: optional op, find not present → no-op silently
                 } else {
                     std::fs::write(&filepath, &new_contents)
                         .map_err(|e| format!("write failed {}: {e}", filepath.display()))?;
+                }
+            }
+            "delete_if_exists" => {
+                // Remove a file if present. Idempotent: no-op if already gone.
+                // Used when a patch's goal is simply "ensure this file doesn't exist"
+                // — e.g. imoen_forever's stale do-once marker (patch #57). Distinct
+                // from `rename_if_exists`, which has "restore pre-MOVE state"
+                // semantics and would no-op here (the (src exists, dest missing)
+                // case is treated as clean by that op).
+                let path = op.get("path").and_then(|v| v.as_str())
+                    .ok_or("delete_if_exists op missing path")?;
+                let resolved = resolve_mod_path_for_io(mod_dir, path, mod_locations);
+                if resolved.exists() {
+                    std::fs::remove_file(&resolved)
+                        .map_err(|e| format!("delete_if_exists failed {}: {e}", resolved.display()))?;
                 }
             }
             "copy_if_missing" => {
@@ -1713,10 +2256,8 @@ fn apply_patch_ops(
                     .ok_or("copy_if_missing op missing src")?;
                 let dest = op.get("dest").and_then(|v| v.as_str())
                     .ok_or("copy_if_missing op missing dest")?;
-                let src_path = resolve_mod_path_with_map(mod_dir, src, mod_locations)
-                    .unwrap_or_else(|| mod_dir.join(src));
-                let dest_path = resolve_mod_path_with_map(mod_dir, dest, mod_locations)
-                    .unwrap_or_else(|| mod_dir.join(dest));
+                let src_path = resolve_mod_path_for_io(mod_dir, src, mod_locations);
+                let dest_path = resolve_mod_path_for_io(mod_dir, dest, mod_locations);
                 if !dest_path.exists() && src_path.exists() {
                     if let Some(parent) = dest_path.parent() {
                         std::fs::create_dir_all(parent).ok();
@@ -1725,16 +2266,51 @@ fn apply_patch_ops(
                         .map_err(|e| format!("copy_if_missing failed {} → {}: {e}", src_path.display(), dest_path.display()))?;
                 }
             }
+            "rename_if_exists" => {
+                // Restore pre-MOVE state: if src is missing and dest exists, rename dest→src.
+                // Used for mods whose MOVE operation consumes source files (DSotSC, NTotSC,
+                // c#anotherfinehell). After one successful install, source is gone and dest
+                // is present. WeiDU's MOVE on re-install then hits "destination exists" and
+                // trips fallback→error. Renaming dest back to src restores the clean pre-install
+                // state so the mod's own MOVE can run.
+                //
+                // Semantics (param names: src = desired source filename, dest = desired dest):
+                //   - src exists AND dest missing: no-op (clean pre-install state)
+                //   - src missing AND dest exists: rename dest → src (restore)
+                //   - both exist: delete dest (mod already installed — restore clean state)
+                //   - both missing: error (mod package is broken)
+                let src = op.get("src").and_then(|v| v.as_str())
+                    .ok_or("rename_if_exists op missing src")?;
+                let dest = op.get("dest").and_then(|v| v.as_str())
+                    .ok_or("rename_if_exists op missing dest")?;
+                let src_path = resolve_mod_path_for_io(mod_dir, src, mod_locations);
+                let dest_path = resolve_mod_path_for_io(mod_dir, dest, mod_locations);
+                match (src_path.exists(), dest_path.exists()) {
+                    (true, false) => { /* clean state, no-op */ }
+                    (false, true) => {
+                        if let Some(parent) = src_path.parent() {
+                            std::fs::create_dir_all(parent).ok();
+                        }
+                        std::fs::rename(&dest_path, &src_path)
+                            .map_err(|e| format!("rename_if_exists failed {} → {}: {e}", dest_path.display(), src_path.display()))?;
+                    }
+                    (true, true) => {
+                        std::fs::remove_file(&dest_path)
+                            .map_err(|e| format!("rename_if_exists cleanup failed {}: {e}", dest_path.display()))?;
+                    }
+                    (false, false) => {
+                        return Err(format!("rename_if_exists: both src and dest missing — {} and {}", src_path.display(), dest_path.display()));
+                    }
+                }
+            }
             "rename" => {
                 let from = op.get("from").and_then(|v| v.as_str())
                     .ok_or("rename op missing from")?;
                 let to = op.get("to").and_then(|v| v.as_str())
                     .ok_or("rename op missing to")?;
-                let from_path = resolve_mod_path_with_map(mod_dir, from, mod_locations)
-                    .unwrap_or_else(|| mod_dir.join(from));
+                let from_path = resolve_mod_path_for_io(mod_dir, from, mod_locations);
                 // For 'to', resolve the first segment the same way as 'from'
-                let to_path = resolve_mod_path_with_map(mod_dir, to, mod_locations)
-                    .unwrap_or_else(|| mod_dir.join(to));
+                let to_path = resolve_mod_path_for_io(mod_dir, to, mod_locations);
                 if from_path.exists() {
                     if let Some(parent) = to_path.parent() {
                         std::fs::create_dir_all(parent).ok();
@@ -1831,26 +2407,50 @@ pub async fn scan_patches(
 
         let mut results = Vec::new();
 
+        // Per-patch scan trace — opt-in via PATCH_TRACE=1 env var. Useful
+        // when the UI's banner disagrees with the visible patch-list state.
+        // Output goes to stderr (captured by gui.log's stderr fallback path).
+        let trace = std::env::var("PATCH_TRACE").ok().as_deref() == Some("1");
+        if trace {
+            eprintln!("PATCH_TRACE mod_dir={} game_dir={}",
+                mod_path.display(), game_path.display());
+        }
+
         for entry in &manifest {
             let triggered = check_trigger(mod_path, game_path, &entry.trigger, &mod_locations);
             if !triggered {
+                if trace {
+                    eprintln!("PATCH_TRACE #{:3}: trigger_failed → not_needed  [{}]",
+                        entry.id, entry.name);
+                }
                 results.push(PatchStatus {
                     id: entry.id,
                     name: entry.name.clone(),
                     description: entry.description.clone(),
                     target_mod: entry.target_mod.clone(),
                     status: "not_needed".to_string(),
+                    recommended: entry.recommended,
+                    category: entry.category.clone(),
                 });
                 continue;
             }
 
             let already_patched = check_marker(mod_path, game_path, &entry.marker, &mod_locations);
+            if trace {
+                eprintln!("PATCH_TRACE #{:3}: trigger_ok marker={} → {}  [{}]",
+                    entry.id,
+                    serde_json::to_string(&entry.marker).unwrap_or_default(),
+                    if already_patched { "already_patched" } else { "applicable" },
+                    entry.name);
+            }
             results.push(PatchStatus {
                 id: entry.id,
                 name: entry.name.clone(),
                 description: entry.description.clone(),
                 target_mod: entry.target_mod.clone(),
                 status: if already_patched { "already_patched" } else { "applicable" }.to_string(),
+                recommended: entry.recommended,
+                category: entry.category.clone(),
             });
         }
 
@@ -1961,6 +2561,10 @@ pub async fn create_backup(
     backup_dir: String,
     name: String,
     mode: String,
+    // Which game this backup represents. One of "bg1" | "bg2" | "iwd" |
+    // "iwd2" | "pst". Defaults to "bg2" if the caller omits — preserves
+    // back-compat for clients built before Phase 9b.
+    game_kind: Option<String>,
 ) -> Result<backup::BackupManifest, String> {
     if BACKUP_STATE.running.load(std::sync::atomic::Ordering::SeqCst) {
         return Err("Backup already in progress".to_string());
@@ -1972,10 +2576,11 @@ pub async fn create_backup(
     BACKUP_STATE.abort_flag.store(false, std::sync::atomic::Ordering::SeqCst);
     BACKUP_STATE.running.store(true, std::sync::atomic::Ordering::SeqCst);
 
+    let kind = game_kind.unwrap_or_else(|| "bg2".to_string());
     let result = tauri::async_runtime::spawn_blocking(move || {
         let r = backup::create_backup(
             &app, Path::new(&game_dir), Path::new(&backup_dir),
-            &name, &mode, &BACKUP_STATE.abort_flag,
+            &name, &mode, &kind, &BACKUP_STATE.abort_flag,
         );
         BACKUP_STATE.running.store(false, std::sync::atomic::Ordering::SeqCst);
         r
@@ -1991,11 +2596,145 @@ pub async fn list_backups(backup_dir: String) -> Result<Vec<backup::BackupInfo>,
     }).await.map_err(|e| e.to_string())?
 }
 
+/// Find every WeiDU mod-local `backup/` directory under `mod_dir`.
+///
+/// A WeiDU mod folder is identified as "a directory containing at least one .tp2 file".
+/// Its WeiDU backup state lives in a `backup/` subdirectory next to the .tp2. After a
+/// game-dir restore (which wipes WeiDU.log), those mod-local backups are orphaned — they
+/// track "I installed component X" for a game that no longer believes X is installed.
+/// WeiDU's next install may then attempt an uninstall that doesn't match the current
+/// game state, producing weird errors.
+///
+/// Returns a list of (backup_path, size_bytes) tuples without deleting anything.
+fn find_orphan_mod_backups(mod_dir: &Path) -> Vec<(std::path::PathBuf, u64)> {
+    let mut results = Vec::new();
+    fn walk(dir: &Path, out: &mut Vec<(std::path::PathBuf, u64)>, depth: usize) {
+        if depth > 6 { return; } // safety cap — typical nesting is 2-3
+        let entries = match std::fs::read_dir(dir) {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+        let mut has_tp2 = false;
+        let mut backup_subdir: Option<std::path::PathBuf> = None;
+        let mut child_dirs: Vec<std::path::PathBuf> = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() {
+                if path.extension().and_then(|e| e.to_str()).map(|s| s.eq_ignore_ascii_case("tp2")).unwrap_or(false) {
+                    has_tp2 = true;
+                }
+            } else if path.is_dir() {
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if name.eq_ignore_ascii_case("backup") {
+                    backup_subdir = Some(path.clone());
+                } else {
+                    child_dirs.push(path);
+                }
+            }
+        }
+        if has_tp2 {
+            if let Some(b) = backup_subdir {
+                let size = dir_size(&b);
+                out.push((b, size));
+            }
+        }
+        // Recurse into non-backup children (Extracted dirs often have Pretty Name/mod_prefix/)
+        for c in child_dirs {
+            walk(&c, out, depth + 1);
+        }
+    }
+    fn dir_size(p: &Path) -> u64 {
+        let mut total = 0u64;
+        if let Ok(it) = std::fs::read_dir(p) {
+            for e in it.flatten() {
+                let path = e.path();
+                if path.is_file() {
+                    if let Ok(meta) = path.metadata() { total += meta.len(); }
+                } else if path.is_dir() {
+                    total += dir_size(&path);
+                }
+            }
+        }
+        total
+    }
+    walk(mod_dir, &mut results, 0);
+    results
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrphanBackup {
+    pub path: String,
+    pub mod_name: String,
+    pub size_bytes: u64,
+}
+
+/// Enumerate mod-local WeiDU backup/ dirs under mod_dir for UI display.
+/// Exposed so ReadyCheck can surface them the same way patches are surfaced:
+/// user sees a list, clicks "Clean" to invoke clean_orphan_backups.
+///
+/// Safety note: we don't cross-reference WeiDU.log. In the common "orphaned after
+/// game-restore" case, ALL backups listed here ARE orphaned. In the rare case where
+/// a user hasn't restored and has a valid WeiDU.log that references these backups,
+/// cleaning them would impair WeiDU's ability to uninstall — so we surface this as
+/// a user-choice action, not an automatic sweep.
+#[tauri::command]
+pub async fn scan_orphan_backups(mod_dir: String) -> Result<Vec<OrphanBackup>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let dir = Path::new(&mod_dir);
+        let entries = find_orphan_mod_backups(dir);
+        let mut out = Vec::new();
+        for (p, size) in entries {
+            let mod_name = p.parent()
+                .and_then(|p| p.file_name())
+                .and_then(|n| n.to_str())
+                .unwrap_or("unknown")
+                .to_string();
+            out.push(OrphanBackup {
+                path: p.to_string_lossy().to_string(),
+                mod_name,
+                size_bytes: size,
+            });
+        }
+        Ok(out)
+    }).await.map_err(|e| e.to_string())?
+}
+
+/// Delete specified mod-local backup/ dirs. Safe because WeiDU regenerates them on install.
+#[tauri::command]
+pub async fn clean_orphan_backups(paths: Vec<String>) -> Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut cleaned = Vec::new();
+        for p in paths {
+            let path = Path::new(&p);
+            // Safety: require path component "backup" (case-insensitive) and at least one .tp2 sibling.
+            let is_backup = path.file_name()
+                .and_then(|n| n.to_str())
+                .map(|s| s.eq_ignore_ascii_case("backup"))
+                .unwrap_or(false);
+            let parent_has_tp2 = path.parent()
+                .and_then(|pp| std::fs::read_dir(pp).ok())
+                .map(|it| it.flatten().any(|e|
+                    e.path().extension().and_then(|x| x.to_str()).map(|s| s.eq_ignore_ascii_case("tp2")).unwrap_or(false)
+                ))
+                .unwrap_or(false);
+            if !is_backup || !parent_has_tp2 {
+                continue; // refuse to delete anything that doesn't look like a WeiDU mod backup
+            }
+            if std::fs::remove_dir_all(path).is_ok() {
+                cleaned.push(p);
+            }
+        }
+        Ok(cleaned)
+    }).await.map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
 pub async fn restore_backup(
     app: AppHandle,
     backup_path: String,
     game_dir: String,
+    mod_dir: Option<String>,
 ) -> Result<(), String> {
     if BACKUP_STATE.running.load(std::sync::atomic::Ordering::SeqCst) {
         return Err("Backup operation already in progress".to_string());
@@ -2007,6 +2746,7 @@ pub async fn restore_backup(
     BACKUP_STATE.abort_flag.store(false, std::sync::atomic::Ordering::SeqCst);
     BACKUP_STATE.running.store(true, std::sync::atomic::Ordering::SeqCst);
 
+    let app_for_emit = app.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
         let r = backup::restore_backup(
             &app, Path::new(&backup_path), Path::new(&game_dir),
@@ -2016,7 +2756,36 @@ pub async fn restore_backup(
         r
     }).await.map_err(|e| e.to_string())?;
 
-    result
+    result?;
+
+    // Auto-purge orphaned mod-local WeiDU backup/ dirs. After a game-dir restore these
+    // backups track components that the restored game no longer considers installed —
+    // leaving them risks WeiDU attempting an uninstall-before-reinstall against phantom
+    // state. Silent best-effort: failure to clean is not a restore failure.
+    if let Some(md) = mod_dir {
+        let md = md.clone();
+        let _ = tauri::async_runtime::spawn_blocking(move || {
+            let entries = find_orphan_mod_backups(Path::new(&md));
+            let mut count = 0u32;
+            let mut bytes = 0u64;
+            for (p, size) in entries {
+                if std::fs::remove_dir_all(&p).is_ok() {
+                    count += 1;
+                    bytes += size;
+                }
+            }
+            if count > 0 {
+                let msg = format!(
+                    "[Infinity Mod Runner] Cleaned {count} orphaned mod backup{} ({:.1} MB reclaimed)",
+                    if count == 1 { "" } else { "s" },
+                    bytes as f64 / 1_048_576.0
+                );
+                let _ = app_for_emit.emit("backup:stdout", msg);
+            }
+        }).await;
+    }
+
+    Ok(())
 }
 
 #[tauri::command]
@@ -2027,7 +2796,64 @@ pub async fn delete_backup(backup_path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+pub async fn verify_backup(backup_path: String) -> Result<backup::VerifyResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        backup::verify_backup(Path::new(&backup_path))
+    }).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 pub fn abort_backup() -> Result<(), String> {
     BACKUP_STATE.abort_flag.store(true, std::sync::atomic::Ordering::SeqCst);
     Ok(())
+}
+
+// ── Windows Defender exclusion management ─────────────────────────────
+//
+// Exposes the four functions from `defender.rs` to the frontend so the
+// UI can:
+//   - Show an accurate pre-install advisory (is Defender even active?)
+//   - Check if the game dir is already excluded (no need to re-prompt)
+//   - Request admin elevation to add / remove an exclusion
+//
+// See `defender.rs` for the rationale. All commands are safe to call on
+// non-Windows (they return `NotApplicable` / false / trivial success).
+
+/// Query Defender's real-time protection state. Returns a small enum the
+/// UI pattern-matches to render the right copy ("Defender is active,
+/// excluding will save ~4h" vs. "3rd-party AV — no impact").
+#[tauri::command]
+pub fn defender_status() -> crate::defender::DefenderStatus {
+    crate::defender::status()
+}
+
+/// Check if a specific path is already in Defender's exclusion list. No
+/// admin needed; used by the UI to avoid prompting for UAC when the
+/// exclusion is already in place.
+#[tauri::command]
+pub fn defender_is_path_excluded(path: String) -> bool {
+    crate::defender::is_path_excluded(std::path::Path::new(&path))
+}
+
+/// Add a path to Defender's exclusion list. Will trigger exactly one
+/// UAC prompt. Returns:
+///   - Ok(true)  exclusion is present afterwards (we added it, or it
+///               already existed)
+///   - Ok(false) user cancelled the UAC prompt; install can still run
+///               but Defender will scan every write
+///   - Err(msg)  structural failure (PowerShell missing, Group Policy
+///               blocked the add, etc.)
+#[tauri::command]
+pub fn defender_add_exclusion(path: String) -> Result<bool, String> {
+    crate::defender::add_exclusion(std::path::Path::new(&path))
+}
+
+/// Remove a path from Defender's exclusion list. Same return semantics
+/// as `defender_add_exclusion`. Intended for use after an install
+/// completes, when the user checked the "auto-remove after install"
+/// option — leaves the system in the same Defender state it was in
+/// before we touched it.
+#[tauri::command]
+pub fn defender_remove_exclusion(path: String) -> Result<bool, String> {
+    crate::defender::remove_exclusion(std::path::Path::new(&path))
 }

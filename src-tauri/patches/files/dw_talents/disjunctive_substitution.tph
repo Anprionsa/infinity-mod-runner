@@ -30,28 +30,36 @@ DEFINE_ACTION_FUNCTION disjunctive_substitution
 			replace=""
 			exclude_array_script="NO_ARRAY"
 			exclude_array_dialog="NO_ARRAY"
+			// _eetmr_bcs_prefilter_v1: forwarded to disjunctive_substitution_bcs.
+			pre_filter=""
 BEGIN
-	LAF disjunctive_substitution_bcs INT_VAR telemetry STR_VAR script match replace exclude_array="%exclude_array_script%" END
+	LAF disjunctive_substitution_bcs INT_VAR telemetry STR_VAR script match replace exclude_array="%exclude_array_script%" pre_filter END
 	LAF disjunctive_substitution_dlg INT_VAR telemetry STR_VAR dialog match replace exclude_array="%exclude_array_dialog%" END
 END
 
 
-DEFINE_ACTION_FUNCTION disjunctive_substitution_bcs//internal 
+DEFINE_ACTION_FUNCTION disjunctive_substitution_bcs//internal
 	INT_VAR telemetry=0//boolean
 	STR_VAR script=""
-			match=""   
+			match=""
 			replace=""
-			exclude_array="NO_ARRAY" 
+			exclude_array="NO_ARRAY"
+			// _eetmr_bcs_prefilter_v1: forwarded to each ALTER_SCRIPT_BLOCK call.
+			// When caller supplies a byte token (e.g. "1073741824" for BARBARIAN
+			// kit ID), ALTER_SCRIPT_BLOCK skips DECOMPILE_BCS_TO_BAF on blocks
+			// that don't contain it. See alter_script.tph for details.
+			pre_filter=""
 BEGIN
 	SILENT
 	ACTION_TO_LOWER exclude_array
 	// parse input
 	LAF parse_disjunctive_match_input STR_VAR replace RET swap_is_or RET_ARRAY replace_array END
 	// apply
-	ACTION_MATCH "%script%" WITH 
+	ACTION_MATCH "%script%" WITH
 	all BEGIN
 		ACTION_CLEAR_ARRAY all_scripts
-		COPY_EXISTING_REGEXP ".*\.bcs" override
+		// _eetmr_glob_biff: GLOB added so biffed BCS files are still found after mid-install BIFF optimization
+		COPY_EXISTING_REGEXP GLOB ".*\.bcs" override
 			SPRINT filename "%SOURCE_RES%"
 			TO_LOWER filename
 			// FIX: Exclude scripts that can't round-trip decompile/recompile:
@@ -65,17 +73,17 @@ BEGIN
 		BUT_ONLY
 
 		ACTION_PHP_EACH all_scripts AS script=>null BEGIN
-			LAF ALTER_SCRIPT_BLOCK INT_VAR STR_VAR script match patch=disjunctive_substitution_bcs_helper END
+			LAF ALTER_SCRIPT_BLOCK INT_VAR STR_VAR script match patch=disjunctive_substitution_bcs_helper pre_filter END
 		END
 	END
 	DEFAULT
 	    ACTION_CLEAR_ARRAY disj_subj_done
 		OUTER_WHILE "%script%" STRING_COMPARE "" BEGIN
-			LAF return_first_entry STR_VAR list="%script%" RET entry script=list END	
+			LAF return_first_entry STR_VAR list="%script%" RET entry script=list END
 			ACTION_TO_LOWER entry
 			ACTION_IF !VARIABLE_IS_SET $disj_subj_done("%entry%") BEGIN // catch duplicates
 				OUTER_SPRINT $disj_subj_done("%entry%") ""
-				LAF ALTER_SCRIPT_BLOCK INT_VAR STR_VAR script="%entry%" match patch=disjunctive_substitution_bcs_helper END
+				LAF ALTER_SCRIPT_BLOCK INT_VAR STR_VAR script="%entry%" match patch=disjunctive_substitution_bcs_helper pre_filter END
 			END
 		END
 	END
@@ -146,10 +154,34 @@ END
 DEFINE_PATCH_FUNCTION disjunctive_substitution_dlg_helper//internal
 BEGIN
 
+		// _eetmr_dlg_perf_v2: extract first IDS token from %match% (e.g. SHAMAN,
+		// BARBARIAN, GNOME, CLERIC_RANGER) and pre-check if the DLG binary
+		// contains it before the expensive DECOMPILE_AND_PATCH. Skips minutes
+		// of decompile on huge NPC DLGs (e.g. Brandock's 1.17 MB c#brandj.dlg)
+		// that cannot possibly match.
+		SPRINT eetmr_ids_token ""
+		eetmr_token_found = 0
+		INNER_PATCH "%match%" BEGIN
+			REPLACE_EVALUATE "\([A-Z][A-Z_0-9]+\)" BEGIN
+				PATCH_IF !eetmr_token_found BEGIN
+					SPRINT eetmr_ids_token "%MATCH1%"
+					eetmr_token_found = 1
+				END
+			END
+			"%MATCH1%"
+		END
+		eetmr_can_match = 1
+		PATCH_IF eetmr_token_found && (STRING_LENGTH "%eetmr_ids_token%") > 2 BEGIN
+			PATCH_IF INDEX_BUFFER ("%eetmr_ids_token%") < 0 BEGIN
+				eetmr_can_match = 0
+			END
+		END
+
+		PATCH_IF eetmr_can_match BEGIN
 		DECOMPILE_AND_PATCH BEGIN
 			REPLACE_EVALUATE "IF ~\([^~]+\)~" BEGIN
 			  PATCH_IF INDEX ("%match%" "%MATCH1%")>=0 BEGIN
-				CLEAR_ARRAY trigger_array 
+				CLEAR_ARRAY trigger_array
 				INNER_PATCH "%MATCH1%" BEGIN
 					LPF disjunctive_get_trigger_array RET_ARRAY trigger_array END
 				END
@@ -159,7 +191,8 @@ BEGIN
 			  END
 			END
 			"IF ~%output%~"
-			
+
+		END
 		END
 
 

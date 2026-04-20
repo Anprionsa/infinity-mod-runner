@@ -387,13 +387,23 @@ STR_VAR script=""
         swap_in3=""
         swap_in4=""
         swap_in5=""
+        // _eetmr_bcs_prefilter_v1: optional raw-BCS byte string that must appear
+        // in a script block for the decompile+match to possibly succeed. When
+        // empty (default), behaviour is identical to upstream. When set (e.g.
+        // "1073741824" for BARBARIAN kit ID, "16396" for Class trigger), blocks
+        // that don't contain this token skip the expensive DECOMPILE_BCS_TO_BAF
+        // call entirely. Must be a byte pattern that is GUARANTEED to appear in
+        // any block that %match% could hit (subset guarantee); otherwise blocks
+        // will be silently skipped that should have been patched.
+        pre_filter=""
 BEGIN
    LAF internal_script_block_master
      INT_VAR only_once recompile
      STR_VAR script match_function patch="%patch%%function%"
-           match match1 match2 match3 match4 match5 
+           match match1 match2 match3 match4 match5
            swap_out swap_out1 swap_out2 swap_out3 swap_out4 swap_out5
            swap_in swap_in1 swap_in2 swap_in3 swap_in4 swap_in5
+           pre_filter
            type=alter
    END
 END
@@ -446,6 +456,9 @@ STR_VAR script=""
         original_swap_in4=""
         original_swap_in5=""
 		type=""
+        // _eetmr_bcs_prefilter_v1: raw-BCS byte token for per-block pre-filter.
+        // See ALTER_SCRIPT_BLOCK doc above.
+        pre_filter=""
 BEGIN
 COPY_EXISTING "%script%.bcs" "override"
      SET found_match=0
@@ -485,12 +498,63 @@ COPY_EXISTING "%script%.bcs" "override"
 			"%MATCH1%"
 		END
      END
+     // _eetmr_bcs_prefilter_v2: PER-BLOCK COMPILE ARCHITECTURE.
+     //
+     // Upstream SFO accumulates decompiled BAF across blocks, then compiles
+     // the whole accumulation at the end. This forces every block through
+     // DECOMPILE_BCS_TO_BAF (expensive) even when pre-filter byte checks
+     // could prove the block cannot possibly match the caller's pattern.
+     //
+     // The v2 architecture inverts the compile point:
+     //   • Each block that CAN'T match (pre_filter miss) passes through as
+     //     raw BCS, skipping DECOMPILE entirely.
+     //   • Each block that COULD match gets DECOMPILE → patch → COMPILE
+     //     within the INNER_PATCH_SAVE, with the outer SC wrappers stripped
+     //     so the per-block output is just block content (CR...RS...CR).
+     //   • Accumulated new_script holds BCS content (consistent format).
+     //   • At the end, one SC wrap pair + one write.
+     //
+     // Trade-offs vs upstream:
+     //   + pre_filter actually skips DECOMPILE (5-10× speedup target)
+     //   + per-block error recovery (one bad block doesn't void all patches)
+     //   - diverges from upstream (must re-sync if SFO changes structure)
+     //   - per-block COMPILE has fixed overhead (~10-50ms × N blocks)
+     //
+     // Escape hatches:
+     //   • pre_filter="" (default) → no skips, standard decompile per block
+     //   • pre_filter="_EETMR_DISABLE_PREFILTER" → explicit opt-out
+     //   • recompile=0 → pre-filter disabled, legacy BAF-accumulation semantics
      WHILE start>0 BEGIN
           SET end=INDEX_BUFFER ("RS%LNL%CR%LNL%")
           SET length=(end - start) + 6
           READ_ASCII start data (length)
+          // _eetmr_v2: save raw block for per-block-failure fallback
+          SPRINT orig_block "%data%"
           DELETE_BYTES start length
           SET decompile_failed=0
+          SET recompile_failed=0
+          SET prefilter_skip=0
+
+          // _eetmr_bcs_prefilter_v3: raw-block byte pre-check BEFORE INNER_PATCH_SAVE.
+          // Gate on recompile=1 because our pass-through produces BCS, while
+          // recompile=0 produces BAF — mixing would corrupt the output file.
+          // v3 fix: use INDEX (string op) instead of INNER_PATCH + INDEX_BUFFER +
+          // OUTER_SET. OUTER_SET is an ACTION-level directive and is a parse error
+          // inside a PATCH-level INNER_PATCH body. INDEX returns -1 when not found,
+          // which maps directly to the same prefilter_skip logic.
+          PATCH_IF "%pre_filter%" STRING_COMPARE "" AND
+                   "%pre_filter%" STRING_COMPARE "_EETMR_DISABLE_PREFILTER" AND
+                   recompile BEGIN
+            PATCH_IF (INDEX ("%pre_filter%" "%data%")) < 0 BEGIN
+              prefilter_skip=1
+            END
+          END
+
+          PATCH_IF prefilter_skip BEGIN
+            // Pass-through path: raw BCS block concatenates to new_script
+            // (which accumulates BCS content in this architecture).
+            SPRINT new_script "%new_script%%data%"
+          END ELSE BEGIN
           INNER_PATCH_SAVE data "SC%LNL%%data%SC%LNL%" BEGIN
              PATCH_TRY
                DECOMPILE_BCS_TO_BAF
@@ -498,7 +562,7 @@ COPY_EXISTING "%script%.bcs" "override"
                // FIX: Catch BCS-to-BAF decompile failures (e.g. large Turnabout mod
                // scripts d0t#alia.bcs/d0t#dyna.bcs that can't survive round-trip).
                // Without this, the unhandled exception aborts the entire component.
-               PATCH_PRINT "WARNING: [%SOURCE_FILE%] block decompile failed — skipping this script block."
+               PATCH_PRINT "WARNING: [%SOURCE_FILE%] block decompile failed — using original block unchanged."
                SET decompile_failed=1
              END
              SET proceed=0
@@ -605,38 +669,58 @@ COPY_EXISTING "%script%.bcs" "override"
                  END
              END
              END // decompile_failed=0 guard
+             // _eetmr_bcs_prefilter_v2: per-block COMPILE + SC-strip.
+             // Only when recompile=1 (debug mode with recompile=0 wants BAF output).
+             // On failure, we'll fall back to the original raw block (see below).
+             PATCH_IF recompile AND decompile_failed=0 BEGIN
+               PATCH_TRY
+                 COMPILE_BAF_TO_BCS
+                 // Strip the two SC{LNL} markers that wrap a single-block
+                 // compile output. BCS grammar forbids SC mid-block, so
+                 // REPLACE_TEXTUALLY safely targets only the boundary markers.
+                 REPLACE_TEXTUALLY "SC%LNL%" ""
+               WITH DEFAULT
+                 // Same philosophy as upstream's whole-file restore — warn
+                 // and fall back (but we fall back PER BLOCK, not per file,
+                 // preserving other blocks' successful patches).
+                 PATCH_PRINT "WARNING: [%SOURCE_FILE%] block recompile failed — using original block unchanged."
+                 SET recompile_failed=1
+               END
+             END
           END
-          SPRINT new_script "%new_script%%data%"
+          // _eetmr_bcs_prefilter_v2: per-block output decision.
+          // On any per-block failure, concatenate the original raw bytes.
+          // This is strictly better than upstream's "restore whole file" fallback
+          // which loses all other blocks' patches on a single block's failure.
+          PATCH_IF decompile_failed OR recompile_failed BEGIN
+            SPRINT new_script "%new_script%%orig_block%"
+          END ELSE BEGIN
+            SPRINT new_script "%new_script%%data%"
+          END
+          END // _eetmr_bcs_prefilter_v2: close prefilter_skip ELSE branch
           SET start=INDEX_BUFFER("CR")
      END
-     // Save original BCS content before we empty the buffer
-     READ_ASCII 0x0 original_bcs (BUFFER_LENGTH)
-     SET original_length=BUFFER_LENGTH
+     // _eetmr_bcs_prefilter_v2: final assembly.
+     //
+     // Replace buffer content with the accumulated output:
+     //   • recompile=1: new_script holds BCS block content without SC wrappers;
+     //     we add one pair of SC{LNL} wrappers to produce a valid BCS file.
+     //   • recompile=0: new_script holds BAF text (legacy debug mode behavior
+     //     preserved from upstream — written as-is to the .bcs file).
+     //
+     // No more whole-file restore fallback — per-block error recovery above
+     // guarantees new_script always contains valid content (patched where
+     // possible, original raw bytes where per-block processing failed).
      DELETE_BYTES 0x0 BUFFER_LENGTH
-     SET alter_script_failed=0
-     INNER_PATCH_SAVE new_script "%new_script%" BEGIN
-        PATCH_IF recompile BEGIN
-			PATCH_TRY
-				COMPILE_BAF_TO_BCS
-		    WITH DEFAULT
-				// FIX: Instead of PATCH_RERAISE (which aborts the entire COPY and crashes
-				// the mod install), warn and restore original. This mirrors WeiDU core's
-				// decompile_and_patch_context behavior for round-trip failures on scripts
-				// modified by other mods (e.g. a7#dron3.bcs from Golem Construction,
-				// C#AJAN.bcs from Ajantis NPC mod).
-				PATCH_PRINT "WARNING: [%SOURCE_FILE%] alter_script round-trip failure — returning original BCS unchanged."
-				SET alter_script_failed=1
-		    END
-        END
-        SET new_length=BUFFER_LENGTH
-     END
-     PATCH_IF alter_script_failed BEGIN
-        // Restore original BCS content unchanged
-        INSERT_BYTES 0x0 original_length
-        WRITE_ASCIIE 0x0 "%original_bcs%"
+     PATCH_IF recompile BEGIN
+       SPRINT final_bcs "SC%LNL%%new_script%SC%LNL%"
+       SET final_length=STRING_LENGTH "%final_bcs%"
+       INSERT_BYTES 0x0 final_length
+       WRITE_ASCIIE 0x0 "%final_bcs%"
      END ELSE BEGIN
-        INSERT_BYTES 0x0 new_length
-        WRITE_ASCIIE 0x0 "%new_script%"
+       SET debug_length=STRING_LENGTH "%new_script%"
+       INSERT_BYTES 0x0 debug_length
+       WRITE_ASCIIE 0x0 "%new_script%"
      END
 BUT_ONLY
 END

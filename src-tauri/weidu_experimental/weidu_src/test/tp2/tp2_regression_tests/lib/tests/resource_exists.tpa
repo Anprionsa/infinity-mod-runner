@@ -1,0 +1,51 @@
+DEFINE_ACTION_FUNCTION run
+  RET
+    success
+    message
+BEGIN
+  OUTER_SPRINT message "test_resource_exists"
+  PRINT "%message%"
+  ACTION_TRY
+    LAF test_resource_exists END
+    LAF test_resource_fail END
+    OUTER_SET success = 1
+  WITH
+    DEFAULT
+      OUTER_SET success = 0
+      OUTER_SPRINT message "tests failed in resource_exists: %ERROR_MESSAGE%"
+  END
+END
+
+DEFINE_ACTION_FUNCTION test_resource_exists BEGIN
+  ACTION_IF GAME_IS bgee BEGIN
+    ACTION_FOR_EACH file IN ~AR0100.ARE~ // Case-exact against BIF
+                            ~ar0100.are~
+                            ~AR0100.are~
+                            ~ar0100.ARE~
+                            ~util.LUA~ // Case-exact against BIF
+                            ~UTIL.LUA~
+                            ~util.lua~
+                            ~UTIL.lua~
+                            ~TTGEM01.ITM~ // From Tutorial.Bif
+                            ~TTGEM01.itm~
+                            ~ttgem01.ITM~
+                            ~ttgem01.itm~
+    BEGIN
+      ACTION_IF NOT FILE_EXISTS_IN_GAME "%file%" BEGIN
+        OUTER_SPRINT message1 "test_resource_exists: File %file% was expected"
+        OUTER_SPRINT message2 "to exist, but return value was false"
+        FAIL "%message1% %message2%"
+      END
+    END
+  END
+END
+
+DEFINE_ACTION_FUNCTION test_resource_fail BEGIN
+  ACTION_FOR_EACH file IN ~fl#obviously.fake~
+                          ~fl#fail.ARE~
+  BEGIN
+    ACTION_IF FILE_EXISTS_IN_GAME ~%file%~ BEGIN
+      FAIL "test_resource_exists: intended fake file had return value true"
+    END
+  END
+END

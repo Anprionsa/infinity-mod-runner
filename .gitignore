@@ -30,6 +30,26 @@ Thumbs.db
 logo-preview.html
 logo-1024.png
 
+# Internal dev notes (not for public consumption)
+docs/
+
+# Local patch safety snapshots
+src-tauri/patches/.backup_v1_safe_state/
+
+# Vendored WeiDU build artifacts — CI regenerates these on every build
+src-tauri/weidu_experimental/weidu_src/obj/
+src-tauri/weidu_experimental/weidu_src/bin/
+src-tauri/weidu_experimental/weidu_src/**/*.cmx
+src-tauri/weidu_experimental/weidu_src/**/*.cmi
+src-tauri/weidu_experimental/weidu_src/**/*.cmo
+src-tauri/weidu_experimental/weidu_src/**/*.cma
+src-tauri/weidu_experimental/weidu_src/**/*.o
+src-tauri/weidu_experimental/weidu_src/**/*.a
+
+# Python bytecode (any stray __pycache__ in helper scripts)
+__pycache__/
+*.pyc
+
 # Runtime logs
 *.log
 !src-tauri/src/*.rs

@@ -58,7 +58,7 @@ pub fn restore_debug(game_dir: &Path, mod_name: &str) {
 }
 
 /// Backup dialog.tlk with rotating slots (max_backups).
-/// Source: game_dir (where dialog.tlk lives). Destination: data_dir (EETMR's own folder).
+/// Source: game_dir (where dialog.tlk lives). Destination: data_dir (the Runner's own folder).
 pub fn backup_tlk(game_dir: &Path, data_dir: &Path, language: &str, max_backups: usize) {
     // Find dialog.tlk — check configured language first, then fallbacks
     let tlk_paths = [

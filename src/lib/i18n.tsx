@@ -1,6 +1,6 @@
 /**
- * i18n — Multi-language support for EET Mod Runner.
- * Same pattern as EET Mod Forge: t(key, fallback) with flat JSON translation files.
+ * i18n — Multi-language support for Infinity Mod Runner.
+ * Same pattern as Infinity Mod Forge: t(key, fallback) with flat JSON translation files.
  * English is always the fallback — no English JSON loaded at runtime.
  */
 
@@ -77,7 +77,7 @@ export function I18nProvider({ lang, onLangChange, children }: I18nProviderProps
 }
 
 // ── Language Selector Component ──
-// Styled to match EET Mod Forge: globe icon + language code, dropdown on click
+// Styled to match Infinity Mod Forge: globe icon + language code, dropdown on click
 
 export function LanguageSelector() {
   const { uiLang, setUiLang } = useI18n();

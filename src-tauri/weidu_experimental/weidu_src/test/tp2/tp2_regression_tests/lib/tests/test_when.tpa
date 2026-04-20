@@ -1,0 +1,123 @@
+DEFINE_ACTION_FUNCTION run
+  RET
+    success
+    message
+BEGIN
+  OUTER_SPRINT message "test_when"
+  PRINT "%message%"
+  ACTION_TRY
+    LAF test_if_size_is END
+    LAF test_if END
+    LAF test_unless END
+    LAF test_but_only END
+    LAF test_if_exists END
+    OUTER_SET success = 1
+  WITH
+    DEFAULT
+      OUTER_SET success = 0
+      OUTER_SPRINT message "tests failed in test_when: %ERROR_MESSAGE%"
+  END
+END
+
+DEFINE_ACTION_FUNCTION test_if_size_is BEGIN
+  COPY "%MOD_FOLDER%/resources/2da/fl#when.2da" "override/ifsizeis.2da"
+  IF_SIZE_IS 31
+  ACTION_IF NOT FILE_EXISTS_IN_GAME ifsizeis.2da BEGIN
+    FAIL "test_if_size_is: file was not copied as expected"
+  END
+
+  APPEND ifsizeis.2da "D * * * *"
+  IF_SIZE_IS 32
+  COPY_EXISTING "ifsizeis.2da" override
+    SET index = INDEX_BUFFER (CASE_SENSITIVE EXACT_MATCH "D * * * *")
+  BUT_ONLY
+  ACTION_IF NOT index < 0 BEGIN
+    FAIL "test_if_size_is: append was carried out despite wrong size"
+  END
+END
+
+DEFINE_ACTION_FUNCTION test_if BEGIN
+  COPY "%MOD_FOLDER%/resources/baf/fl#when.baf" "override/fl#if.bcs"
+    COMPILE_BAF_TO_BCS
+
+  EXTEND_TOP fl#if.bcs "%MOD_FOLDER%/resources/baf/fl#extend.baf"
+  IF fl#when
+  COPY_EXISTING fl#if.bcs override
+    SET index = INDEX_BUFFER (CASE_SENSITIVE EXACT_MATCH fl#extend)
+  BUT_ONLY
+  ACTION_IF NOT index < 0 BEGIN
+    FAIL "test_if: script was not extended as expected"
+  END
+
+  COPY "%MOD_FOLDER%/resources/2da/fl#when.2da" "override/fl#ifno.2da"
+  IF fl#not_here
+  ACTION_IF FILE_EXISTS_IN_GAME fl#ifno.2da BEGIN
+    FAIL "test_if: file was copied despite not-present IF"
+  END
+END
+
+DEFINE_ACTION_FUNCTION test_unless BEGIN
+  COPY "%MOD_FOLDER%/resources/baf/fl#when.baf" "override/fl#unl.bcs"
+    COMPILE_BAF_TO_BCS
+
+  EXTEND_TOP fl#unl.bcs "%MOD_FOLDER%/resources/baf/fl#extend.baf"
+  UNLESS fl#not_here
+  COPY_EXISTING fl#unl.bcs override
+    SET index = INDEX_BUFFER (CASE_SENSITIVE EXACT_MATCH fl#extend)
+  BUT_ONLY
+  ACTION_IF NOT index < 0 BEGIN
+    FAIL "test_unless: script was not extended as expected"
+  END
+
+  COPY "%MOD_FOLDER%/resources/2da/fl#when.2da" "override/fl#unlno.2da"
+  UNLESS 2DA
+  ACTION_IF FILE_EXISTS_IN_GAME fl#unlno.2da BEGIN
+    FAIL "test_unless: file was copied despite present UNLESS"
+  END
+END
+
+DEFINE_ACTION_FUNCTION test_but_only BEGIN
+  COPY "%MOD_FOLDER%/resources/2da/fl#when.2da" "override/fl#b_o.2da"
+  BUT_ONLY
+  ACTION_IF FILE_EXISTS_IN_GAME fl#b_o.2da BEGIN
+    FAIL "test_but_only: file was copied against expectations"
+  END
+
+  COPY "%MOD_FOLDER%/resources/2da/fl#when.2da" "override/fl#b_o.2da"
+    SET_2DA_ENTRY 2 1 0 A4
+  BUT_ONLY
+  ACTION_IF NOT FILE_EXISTS_IN_GAME fl#b_o.2da BEGIN
+    FAIL "test_but_only: file was not copied despite expectations"
+  END
+END
+
+DEFINE_ACTION_FUNCTION test_if_exists BEGIN
+  COPY "%MOD_FOLDER%/resources/2da/fl#not_here.2da" override
+  IF_EXISTS
+  ACTION_IF FILE_EXISTS_IN_GAME fl#not_here BEGIN
+    FAIL "test_if_exists: file was copied against expectations"
+  END
+
+  COPY "%MOD_FOLDER%/resources/2da/fl#when.2da" override
+  APPEND_COL fl#when.2da "$ 4 A4"
+  IF_EXISTS
+  COPY_EXISTING fl#when.2da override
+    SET index = INDEX_BUFFER (CASE_SENSITIVE EXACT_MATCH "A A1 A2 A3 A4")
+  BUT_ONLY
+
+  ACTION_IF NOT index < 0 BEGIN
+    FAIL "test_if_exists: append was not carried out despite expectations"
+  END
+
+  COPY ".../fl#inlined/null.file" "override/fl#null.ext"
+  IF_EXISTS
+  ACTION_IF NOT FILE_EXISTS_IN_GAME fl#null.ext BEGIN
+    FAIL "test_if_exists: inlined file was not copied despite expectations"
+  END
+
+  COPY ".../fl#not_defined" "override/fl#null2.ext"
+  IF_EXISTS
+  ACTION_IF FILE_EXISTS_IN_GAME fl#null2.ext BEGIN
+    FAIL "test_if_exists: inlined file was copied against expectations"
+  END
+END

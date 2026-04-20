@@ -32,7 +32,7 @@ LANGUAGE ~Italiano] [translation by Alessandro Nosenzo, proofreading by Aedan~ ~
 
 BEGIN ~Animal Companions For All Rangers (Optional: Druids)~ // Name Of This Component.
 
-// EET Mod Forge Patch: Replaced ACTION_READLN prompts with defaults for automated install
+// Infinity Mod Forge Patch: Replaced ACTION_READLN prompts with defaults for automated install
 OUTER_SET druid = 1
 OUTER_SPRINT name ~Companion~
 

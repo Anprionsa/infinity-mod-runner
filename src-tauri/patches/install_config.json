@@ -1,6 +1,14 @@
 {
   "force_small_batch_mods": ["mih_eq", "mih_ip", "mih_tweaks", "trap_overhaul", "dw_talents", "stratagems"],
   "force_small_batch_size": 3,
+  "per_mod_timeout_secs": {
+    "_comment": "Per-mod timeout override (seconds). Falls back to config.timeout_secs (default 7200 = 2h) when a mod isn't listed. Known-slow mods that legitimately exceed the 2h global cap get a bump here. dw_talents HLAs (cn:60200) scans the full override/ dir — on a 120k-file megainstall each slow cn can run 1-3h.",
+    "dw_talents": 21600
+  },
+  "force_single_cn_mods": {
+    "_comment": "Components that must run as single-component batches so a timeout on the slow cn doesn't drag its batch-mates into AUTO_SKIP. dw_talents 60200 = Revised HLAs, 60300 = Leveller.",
+    "dw_talents": [60200, 60300]
+  },
   "essential_mods": ["dlcmerger", "eefixpack", "eet", "eet_end"],
   "watched_files": ["ACTION.IDS", "TRIGGER.IDS", "AREATYPE.IDS", "BD0120.BCS"],
   "eet_auto_fill_trigger": "Enter the full path to your BG:EE+SoD installation",
@@ -29,5 +37,12 @@
     "_comment": "When mod X is junctioned, also junction sibling directory Y from the same parent. Key = mod folder name (lowercase), Value = list of sibling folder names.",
     "tddz": ["TDD"],
     "mercenaries": ["mercy_of_bhaal", "slaves_of_bhaal"]
+  },
+
+  "_enable_biff_delete_optimization_doc": "A/B harness toggle for the mid-install BIFF-delete optimization. When a boolean is set (true or false), overrides the UI's user-facing setting for BOTH start_native_install and start_dry_run paths. When absent (the default), the UI value (default: true) applies. The orchestrator emits a `[PREBIFF] delete_optimization=<bool> reason=<ran|biff_missing|disabled> biffed=N deleted=N delete_errors=N override_before=N override_after=N biff_file_size=N` line to install.log on every run that reaches the BIFF step — analyze_install_log.py in weidu_experimental/tools/ parses this to confirm which variant executed. Uncomment `enable_biff_delete_optimization` below to pin:",
+  "_enable_biff_delete_optimization_examples": {
+    "baseline_A": "enable_biff_delete_optimization: false  — MAKE_BIFF runs but override/ stays full (pre-fix behaviour; expect 4h+ on dw_talents cn:60200)",
+    "biff_only_C": "enable_biff_delete_optimization: true  — with cache off, isolates the BIFF-delete win",
+    "combined_D": "enable_biff_delete_optimization: true  — with cache on, full stack"
   }
 }

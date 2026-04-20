@@ -14,6 +14,11 @@ pub struct InstallTracker {
     warnings: usize,
     errors: usize,
     skipped: usize,
+    /// Subset of `skipped` where the message begins with "Pre-skipped:" —
+    /// components the orchestrator fast-skipped because the mod's earlier
+    /// batch failed. Surfaced in the completion summary so the "N skipped"
+    /// figure can be read as "M primary + (N-M) cascade".
+    skipped_cascade: usize,
     already_installed: usize,
     logger: Option<SharedLogger>,
 }
@@ -29,6 +34,7 @@ impl InstallTracker {
             warnings: 0,
             errors: 0,
             skipped: 0,
+            skipped_cascade: 0,
             already_installed: 0,
             logger,
         }
@@ -40,6 +46,28 @@ impl InstallTracker {
             "total_batches": total_batches,
             "mod_name": mod_name,
             "components": components,
+        }));
+    }
+
+    /// Same as `emit_batch_start` but carries an optional `known_slow_reason`
+    /// when the batch contains a component marked as known-slow by
+    /// `installer::known_slow_reason`. The Slow Batch UI uses this to show a
+    /// targeted "this is expected, don't abort" message instead of the
+    /// generic slow-batch warning.
+    pub fn emit_batch_start_with_hints(
+        &self,
+        batch_idx: usize,
+        total_batches: usize,
+        mod_name: &str,
+        components: &[String],
+        known_slow_reason: Option<&str>,
+    ) {
+        let _ = self.app.emit("install:batch_start", serde_json::json!({
+            "batch_idx": batch_idx,
+            "total_batches": total_batches,
+            "mod_name": mod_name,
+            "components": components,
+            "known_slow_reason": known_slow_reason,
         }));
     }
 
@@ -58,7 +86,21 @@ impl InstallTracker {
                 ComponentStatus::Success => self.success += 1,
                 ComponentStatus::Warning => self.warnings += 1,
                 ComponentStatus::Error => self.errors += 1,
-                ComponentStatus::Skipped => self.skipped += 1,
+                ComponentStatus::Skipped => {
+                    self.skipped += 1;
+                    // Classify cascade skips by their message prefix —
+                    // orchestrator.rs emits exactly this string when fast-skipping
+                    // a batch because the mod's previous batch hard-failed. Any
+                    // other Skipped (REQUIRE_PREDICATE, retry-exhausted, user
+                    // abort, WeiDU silent skip) stays in the "primary" bucket.
+                    if r.message
+                        .as_deref()
+                        .map(|m| m.starts_with("Pre-skipped:"))
+                        .unwrap_or(false)
+                    {
+                        self.skipped_cascade += 1;
+                    }
+                }
                 ComponentStatus::AlreadyInstalled => self.already_installed += 1,
             }
         }
@@ -104,6 +146,14 @@ impl InstallTracker {
         }));
     }
 
+    /// Emitted when the orchestrator exits a pause (either pre-configured
+    /// PausePoint or user-requested via `install_pause`). The frontend uses
+    /// this to unfreeze the elapsed-time counter and clear any "Paused"
+    /// banner, independent of whatever Resume click path it took.
+    pub fn emit_resumed(&self) {
+        let _ = self.app.emit("install:resumed", serde_json::json!({}));
+    }
+
     pub fn emit_input_needed(&self, prompt: &str) {
         let _ = self.app.emit("install:input_needed", serde_json::json!({
             "prompt": prompt,
@@ -117,6 +167,7 @@ impl InstallTracker {
             warnings: self.warnings,
             errors: self.errors,
             skipped: self.skipped,
+            skipped_cascade: self.skipped_cascade,
             already_installed: self.already_installed,
             elapsed_ms: self.start_time.elapsed().as_millis() as u64,
             aborted,

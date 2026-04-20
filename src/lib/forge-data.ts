@@ -1,12 +1,173 @@
 /// Fetch JSON data from the hosted Forge.
 
+import { FALLBACK_CATEGORY_DISPLAY_ORDER } from "../constants/categories";
+import {
+  FALLBACK_ACCELERATOR_COEFFICIENTS,
+  type AcceleratorCoefficients,
+  type HeavyClass,
+} from "../constants/install-baselines";
+
+/** Per-component install-duration profile from Forge. Populated for mods
+ * that have been measured (hand-seeded + telemetry-aggregated). Absent
+ * entries fall back to the heavyClass default via `inferHeavyClass`. */
+export interface InstallProfileEntry {
+  baselineSec: number;
+  heavyClass: HeavyClass;
+  sampleCount: number;
+  updatedAt?: string;
+  notes?: string;
+}
+
+/** Keyed lookup: `"<tp2_name_lc>:<cn>"` → baseline info. */
+export type InstallProfileMap = Map<string, InstallProfileEntry>;
+
+/** Fetch install-duration baselines for a set of mods from Forge.
+ *
+ * Reads the same per-mod detail files used by the enrichment path, filters
+ * the `installProfile` field out of each component. Returns a map keyed
+ * `"<tp2_name_lc>:<cn>"` → entry. Missing entries mean "no data; use
+ * heavyClass default". */
+export async function fetchInstallProfiles(
+  baseUrl: string,
+  modNames: string[],
+): Promise<InstallProfileMap> {
+  const result: InstallProfileMap = new Map();
+  if (modNames.length === 0) return result;
+
+  let catalog: Record<string, string>;
+  let modIndex: unknown;
+  try {
+    const [catResp, idxResp] = await Promise.all([
+      fetch(`${baseUrl}/data/mods/_catalog.json`),
+      fetch(`${baseUrl}/data/mods-index.json`),
+    ]);
+    if (!catResp.ok || !idxResp.ok) return result;
+    catalog = await catResp.json();
+    modIndex = await idxResp.json();
+  } catch {
+    return result;
+  }
+
+  const indexArr = Array.isArray(modIndex)
+    ? modIndex
+    : Object.values(modIndex as Record<string, unknown>);
+  const nameToFile = new Map<string, string>();
+  for (const info of indexArr) {
+    const e = info as { t?: string; i?: number };
+    const tp2Name = (e.t || "").toLowerCase();
+    const modId = String(e.i || "");
+    const filename = catalog[modId];
+    if (tp2Name && filename) nameToFile.set(tp2Name, filename);
+  }
+
+  const toFetch = modNames
+    .map((n) => ({ name: n, file: nameToFile.get(n.toLowerCase()) }))
+    .filter((x): x is { name: string; file: string } => !!x.file);
+
+  const BATCH = 20;
+  for (let i = 0; i < toFetch.length; i += BATCH) {
+    const batch = toFetch.slice(i, i + BATCH);
+    const results = await Promise.allSettled(
+      batch.map(async ({ name, file }) => {
+        const resp = await fetch(`${baseUrl}/data/mods/${encodeURIComponent(file)}`);
+        if (!resp.ok) return null;
+        const data = (await resp.json()) as {
+          co?: Array<{ cn?: number; installProfile?: InstallProfileEntry }>;
+        };
+        return { name, co: data.co || [] };
+      }),
+    );
+    for (const r of results) {
+      if (r.status !== "fulfilled" || !r.value) continue;
+      const { name, co } = r.value;
+      const nameLc = name.toLowerCase();
+      for (const comp of co) {
+        if (comp.cn === undefined || !comp.installProfile) continue;
+        result.set(`${nameLc}:${comp.cn}`, comp.installProfile);
+      }
+    }
+  }
+
+  return result;
+}
+
+/** Fetch the accelerator discount coefficients from Forge. Falls back to
+ * the local defaults when the file is missing or malformed so a broken
+ * Forge deploy doesn't wreck ETA. */
+export async function fetchAcceleratorCoefficients(
+  baseUrl: string,
+): Promise<AcceleratorCoefficients> {
+  try {
+    const resp = await fetch(`${baseUrl}/data/accelerator-profile-ref.json`);
+    if (!resp.ok) return FALLBACK_ACCELERATOR_COEFFICIENTS;
+    const data = (await resp.json()) as {
+      coefficients?: Partial<AcceleratorCoefficients>;
+    };
+    const c = data.coefficients;
+    if (!c) return FALLBACK_ACCELERATOR_COEFFICIENTS;
+    return {
+      overrideFastDrive: c.overrideFastDrive || FALLBACK_ACCELERATOR_COEFFICIENTS.overrideFastDrive,
+      experimentalWeidu: c.experimentalWeidu || FALLBACK_ACCELERATOR_COEFFICIENTS.experimentalWeidu,
+      batchSizePenaltyPerStepBelow25:
+        typeof c.batchSizePenaltyPerStepBelow25 === "number"
+          ? c.batchSizePenaltyPerStepBelow25
+          : FALLBACK_ACCELERATOR_COEFFICIENTS.batchSizePenaltyPerStepBelow25,
+    };
+  } catch {
+    return FALLBACK_ACCELERATOR_COEFFICIENTS;
+  }
+}
+
+/** Fetch the canonical category install order from Forge.
+ *
+ * Source: `/data/categories.json` on the hosted Forge (shipped in v4.0.0+).
+ * If the fetch fails or the response is missing categories, returns the
+ * local `FALLBACK_CATEGORY_DISPLAY_ORDER` so the Runner keeps working
+ * against older Forge deployments. */
+export async function fetchCategories(baseUrl: string): Promise<string[]> {
+  try {
+    const resp = await fetch(`${baseUrl}/data/categories.json`);
+    if (!resp.ok) return FALLBACK_CATEGORY_DISPLAY_ORDER;
+    const data = await resp.json();
+    const cats = data?.categories;
+    if (cats && typeof cats === "object") {
+      const names = Object.keys(cats);
+      if (names.length > 0) return names;
+    }
+    return FALLBACK_CATEGORY_DISPLAY_ORDER;
+  } catch {
+    return FALLBACK_CATEGORY_DISPLAY_ORDER;
+  }
+}
+
+/** Player-visible impact — orthogonal to `severity`. See Forge README
+ * "Adding known issues" section for the full rubric. */
+export type KnownIssueCategory =
+  | "cosmetic"       // zero player-visible impact
+  | "likely-benign"  // usually fine, keep an eye out
+  | "caution"        // might indicate a real issue
+  | "concerning";    // likely a real problem
+
+/** Short action hint the UI uses to decide what affordance to render. */
+export type KnownIssueUserAction =
+  | "none"
+  | "retry"
+  | "apply-patches"
+  | "check-docs"
+  | "contact-author";
+
 export interface KnownIssue {
   pattern: string;
   mod: string;
   severity: "critical" | "error" | "warning" | "info";
+  /** Optional — present on classified entries, undefined on legacy ones.
+   * Entries without a category render as "unknown" in the live issues
+   * panel (a signal that this pattern hasn't been triaged yet). */
+  category?: KnownIssueCategory;
   known: boolean;
   description: string;
   workaround: string;
+  user_action?: KnownIssueUserAction;
   forum?: string;
 }
 
@@ -36,8 +197,10 @@ export async function fetchCompat(baseUrl: string): Promise<CompatData> {
 export interface ModKnownIssue {
   pattern: string;
   severity: string;
+  category?: KnownIssueCategory;
   description: string;
   workaround: string;
+  user_action?: KnownIssueUserAction;
   components?: number[];
   forum?: string;
 }
@@ -129,9 +292,11 @@ export async function fetchAllModKnownIssues(
           pattern: ki.pattern,
           mod: r.value.name,
           severity: ki.severity as KnownIssue["severity"],
+          category: ki.category,
           known: true,
           description: ki.description,
           workaround: ki.workaround,
+          user_action: ki.user_action,
           forum: ki.forum,
         });
       }
@@ -375,12 +540,24 @@ export function checkKitLimit(totalKits: number): { severity: "ok" | "warn" | "e
 
 // ─── Download Manager Data ───
 
-/** Mod index entry with URL and basic info */
+/** Mod index entry with URL and basic info.
+ *
+ * Download override fields (optional) let the Forge correct link problems
+ * without requiring a Runner release:
+ *   - `dl`      full download URL, takes precedence over all construction
+ *   - `branch`  GitHub default-branch override (e.g. "master") for mods
+ *               without a release tag; builds `/archive/refs/heads/<branch>.zip`
+ *   - `src`     force a specific DownloadSource (e.g. "manual") bypassing
+ *               auto-detection, when the host check gets something wrong
+ */
 export interface ModIndexEntry {
   i: number;
-  t: string;  // tp2 folder name
-  n: string;  // display name
-  u?: string; // URL
+  t: string;    // tp2 folder name
+  n: string;    // display name
+  u?: string;   // upstream page URL
+  dl?: string;  // explicit download URL override (Forge-controlled)
+  branch?: string; // GitHub branch override for no-release-tag mods
+  src?: "github_release" | "github_archive" | "direct" | "manual" | "none"; // source override
   [key: string]: unknown;
 }
 
@@ -400,13 +577,40 @@ export interface VersionCacheEntry {
 
 export type VersionCache = Record<string, VersionCacheEntry>;
 
+// ─── Forge data freshness tracking ───
+//
+// The Runner caches Forge data in memory after startup. When the Forge
+// repo is updated (link fix, new release tag, new mod), users won't see
+// the change until the app restarts UNLESS we explicitly re-fetch.
+// `forgeDataAgeMs()` lets the UI show data age; `refreshForgeData()`
+// forces a bypass of any HTTP cache so a manual or pre-download refresh
+// actually hits the origin.
+let lastFetchAt: number | null = null;
+
+/** Milliseconds since the last successful Forge fetch, or null if never. */
+export function forgeDataAgeMs(): number | null {
+  return lastFetchAt === null ? null : Date.now() - lastFetchAt;
+}
+
+/** Internal: fetch with cache-bust when requested. */
+async function fetchJson<T>(url: string, bustCache: boolean): Promise<T> {
+  const finalUrl = bustCache ? `${url}?t=${Date.now()}` : url;
+  const resp = await fetch(finalUrl, bustCache ? { cache: "no-store" } : undefined);
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  return resp.json();
+}
+
 /** Fetch the full mod index */
 export async function fetchModIndex(
   baseUrl: string,
+  opts?: { bustCache?: boolean },
 ): Promise<Record<string, ModIndexEntry>> {
-  const resp = await fetch(`${baseUrl}/data/mods-index.json`);
-  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-  return resp.json();
+  const data = await fetchJson<Record<string, ModIndexEntry>>(
+    `${baseUrl}/data/mods-index.json`,
+    opts?.bustCache ?? false,
+  );
+  lastFetchAt = Date.now();
+  return data;
 }
 
 // fetchGitHubMods removed — github_mods.json deleted, data in per-mod gh field
@@ -414,10 +618,14 @@ export async function fetchModIndex(
 /** Fetch version cache (GitHub release info) */
 export async function fetchVersionCache(
   baseUrl: string,
+  opts?: { bustCache?: boolean },
 ): Promise<VersionCache> {
-  const resp = await fetch(`${baseUrl}/data/version_cache.json`);
-  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-  return resp.json();
+  const data = await fetchJson<VersionCache>(
+    `${baseUrl}/data/version_cache.json`,
+    opts?.bustCache ?? false,
+  );
+  lastFetchAt = Date.now();
+  return data;
 }
 
 /** Download source categorization */
@@ -435,7 +643,16 @@ export interface DownloadInfo {
   siteName: string;      // "GitHub", "Weasel Mods", etc.
 }
 
-/** Build download info for a mod given Forge data */
+/** Build download info for a mod given Forge data.
+ *
+ * Resolution order:
+ *   1. `dl` override on the mod entry — full URL, used verbatim
+ *   2. `src` override forces a DownloadSource (e.g. "manual")
+ *   3. GitHub URL detection from `u`, with `branch` override for the
+ *      no-release-tag fallback (default "main")
+ *   4. Host-based detection (Weasel Mods, etc.)
+ *   5. Fallback: manual
+ */
 export function buildDownloadInfo(
   tp2Name: string,
   displayName: string,
@@ -443,13 +660,36 @@ export function buildDownloadInfo(
   versionCache: VersionCache,
 ): DownloadInfo {
   // Find the mod in the index by tp2 name
+  let entry: ModIndexEntry | undefined;
   let modUrl: string | null = null;
-  for (const entry of Object.values(modIndex)) {
-    if (entry.t && entry.t.toLowerCase() === tp2Name.toLowerCase()) {
-      modUrl = (entry.u as string) || null;
-      displayName = entry.n || displayName;
+  for (const e of Object.values(modIndex)) {
+    if (e.t && e.t.toLowerCase() === tp2Name.toLowerCase()) {
+      entry = e;
+      modUrl = (e.u as string) || null;
+      displayName = e.n || displayName;
       break;
     }
+  }
+
+  // Tier 1a override #1: explicit `dl` URL takes precedence over construction.
+  // This is the Forge-controlled escape hatch — any URL the runner can't
+  // construct correctly (master-branch fallback, weird hosts, archive
+  // redirects, etc.) can be hand-corrected without a Runner release.
+  if (entry?.dl) {
+    return {
+      modName: tp2Name, displayName, url: entry.dl, sourceUrl: modUrl,
+      source: entry.src || "direct",
+      siteName: entry.src === "manual" ? "Manual" : "Forge override",
+    };
+  }
+
+  // Tier 1a override #2: explicit `src` of "manual" forces manual flow even
+  // when we have a URL we'd otherwise auto-download.
+  if (entry?.src === "manual") {
+    return {
+      modName: tp2Name, displayName, url: null, sourceUrl: modUrl,
+      source: "manual", siteName: "Manual",
+    };
   }
 
   if (!modUrl) {
@@ -474,8 +714,10 @@ export function buildDownloadInfo(
       };
     }
 
-    // No release — download default branch as zip
-    const archiveUrl = `https://github.com/${owner}/${repo}/archive/refs/heads/main.zip`;
+    // No release — download default branch as zip. Tier 1a override #3:
+    // Forge can specify `branch: "master"` for repos that haven't migrated.
+    const branch = entry?.branch || "main";
+    const archiveUrl = `https://github.com/${owner}/${repo}/archive/refs/heads/${branch}.zip`;
     return {
       modName: tp2Name, displayName, url: archiveUrl, sourceUrl: modUrl,
       source: "github_archive", owner, repo, siteName: "GitHub",
@@ -521,7 +763,7 @@ export function buildDownloadInfo(
 
 // ─── Presets & Community Builds ───
 
-export const TELEMETRY_BASE_URL = "https://anprionsa.github.io/eet-mod-telemetry";
+export const TELEMETRY_BASE_URL = "https://anprionsa.github.io/infinity-mod-telemetry";
 
 export interface ForgePreset {
   id: string;
@@ -533,6 +775,8 @@ export interface ForgePreset {
   tier?: number;
   difficulty?: string;
   hash?: string;
+  /** Key format version: 1 = idx-based (legacy), 2 = wc-based (stable). Absent = 1. */
+  schemaVersion?: number;
 }
 
 export interface CommunityBuildMeta {
@@ -549,6 +793,14 @@ export interface CommunityBuildMeta {
   componentCount: number;
   forgeVersion: string;
   createdAt: string;
+  /** Key format version: 1 = idx-based (legacy), 2 = wc-based (stable). Absent = 1. */
+  schemaVersion?: number;
+  /** Build-specific semver-ish version; bumped when the author publishes an update. Defaults "1.0.0". */
+  version?: string;
+  /** ISO timestamp of the last update. Defaults to createdAt. */
+  updatedAt?: string;
+  /** GitHub username of the original author; used by the aggregator to authorize updates. */
+  authorGitHub?: string;
 }
 
 export interface CommunityBuild extends CommunityBuildMeta {
@@ -565,7 +817,7 @@ export async function fetchCommunityBuildIndex(telemetryUrl?: string): Promise<C
   const base = telemetryUrl || TELEMETRY_BASE_URL;
   const urls = [
     `${base}/data/builds/_index.json`,
-    "https://raw.githubusercontent.com/Anprionsa/eet-mod-telemetry/main/data/builds/_index.json",
+    "https://raw.githubusercontent.com/Anprionsa/infinity-mod-telemetry/main/data/builds/_index.json",
   ];
   for (const url of urls) {
     try {
@@ -583,7 +835,7 @@ export async function fetchCommunityBuild(id: string, telemetryUrl?: string): Pr
   const base = telemetryUrl || TELEMETRY_BASE_URL;
   const urls = [
     `${base}/data/builds/${id}.json`,
-    `https://raw.githubusercontent.com/Anprionsa/eet-mod-telemetry/main/data/builds/${id}.json`,
+    `https://raw.githubusercontent.com/Anprionsa/infinity-mod-telemetry/main/data/builds/${id}.json`,
   ];
   for (const url of urls) {
     try {
@@ -602,13 +854,16 @@ const BGEE_CATEGORIES = new Set(["PRE EET BGEE MODS"]);
 
 /**
  * Resolve preset/build keys into WeiDU.log text.
- * Keys are "modId-compIdx" (e.g., "3-0" = DLC Merger component 0).
+ * Keys are either:
+ *   - schemaVersion 1 (or absent): "modId-compIdx" — array index into mod.co (legacy, volatile)
+ *   - schemaVersion 2: "modId-wc" — WeiDU component number (stable across mod updates)
  * Returns separate EET and BG1:EE logs.
  */
 export async function resolvePresetToLog(
   baseUrl: string,
   keys: string[],
   language: string,
+  schemaVersion: number = 1,
 ): Promise<{ eetLog: string; bgeeLog: string | null; modCount: number; skipped: number }> {
   // Fetch mod index
   const indexResp = await fetch(`${baseUrl}/data/mods-index.json`);
@@ -622,33 +877,10 @@ export async function resolvePresetToLog(
     if (id !== undefined) modsById.set(id, entry);
   }
 
-  // Category install order — must match Forge's categories.json
-  // Hardcoded as fallback since categories.json may not be deployed
-  const CATEGORY_ORDER: string[] = [
-    "PRE EET BGEE MODS", "EET STARTS HERE", "ENGINE", "INTERFACE",
-    "GRAPHICAL AND SOUND OVERWRITE MODS", "RESTORATIONS",
-    "QUEST MODS BG1", "QUEST MODS BG2", "QUEST MODS ToB",
-    "NEW NPC MODS", "NPC EXPANSIONS", "NPC CROSSMOD", "CREATURE MODS",
-    "ITEM ADDITION MODS", "SPELL MODS", "KIT & CLASS MODS",
-    "PRE-TACTICAL TWEAKS", "TACTICAL MODS", "POST-TACTICAL TWEAKS",
-    "NPC CUSTOMIZATION", "POST-TACTICAL QUESTS",
-    "MUSIC & AUDIO", "PORTRAITS", "EET FINALIZATION", "POST EET",
-  ];
+  // Category install order: Forge-hosted when available, local fallback otherwise
+  const categoryNames = await fetchCategories(baseUrl);
   const categoryOrder = new Map<string, number>();
-  CATEGORY_ORDER.forEach((name, idx) => categoryOrder.set(name, idx));
-
-  // Try to fetch fresh order from Forge (overrides hardcoded if available)
-  try {
-    const catResp = await fetch(`${baseUrl}/data/categories.json`);
-    if (catResp.ok) {
-      const catData = await catResp.json();
-      const cats = catData.categories || {};
-      let idx = 0;
-      for (const name of Object.keys(cats)) {
-        categoryOrder.set(name, idx++);
-      }
-    }
-  } catch { /* use hardcoded fallback */ }
+  categoryNames.forEach((name, idx) => categoryOrder.set(name, idx));
 
   // Collect all resolved components with their sort order
   interface ResolvedComp {
@@ -666,8 +898,8 @@ export async function resolvePresetToLog(
     const dashIdx = key.indexOf("-");
     if (dashIdx < 0) { skipped++; continue; }
     const modId = parseInt(key.substring(0, dashIdx), 10);
-    const compIdx = parseInt(key.substring(dashIdx + 1), 10);
-    if (isNaN(modId) || isNaN(compIdx)) { skipped++; continue; }
+    const secondPart = parseInt(key.substring(dashIdx + 1), 10);
+    if (isNaN(modId) || isNaN(secondPart)) { skipped++; continue; }
 
     const mod = modsById.get(modId);
     if (!mod) { skipped++; continue; }
@@ -680,9 +912,21 @@ export async function resolvePresetToLog(
     const category = (mod.c as string) || "";
     const ord = (mod.ord as number) ?? 9999;
 
-    if (compIdx >= coWC.length) { skipped++; continue; }
+    // Derive (compIdx, weiduComp) from key based on schemaVersion.
+    // v1: secondPart is compIdx; weiduComp = coWC[compIdx]
+    // v2: secondPart is wc;      compIdx = coWC.indexOf(wc)
+    let compIdx: number;
+    let weiduComp: number;
+    if (schemaVersion >= 2) {
+      compIdx = coWC.indexOf(secondPart);
+      if (compIdx < 0) { skipped++; continue; }
+      weiduComp = secondPart;
+    } else {
+      if (secondPart >= coWC.length) { skipped++; continue; }
+      compIdx = secondPart;
+      weiduComp = coWC[compIdx];
+    }
 
-    const weiduComp = coWC[compIdx];
     const rawFolder = compIdx < coWF.length ? coWF[compIdx] : null;
     const folder = (rawFolder != null && rawFolder !== "") ? rawFolder : tp2Name;
     const compName = (compIdx < coNames.length && coNames[compIdx]) ? coNames[compIdx] : `Component ${weiduComp}`;
@@ -702,8 +946,8 @@ export async function resolvePresetToLog(
   resolved.sort((a, b) => a.catOrder - b.catOrder || a.ord - b.ord || a.compIdx - b.compIdx);
 
   const header = "// Log of Currently Installed WeiDU Mods";
-  const eetLines = [header, "// Generated by EET Mod Runner from Forge preset"];
-  const bgeeLines = [header, "// Generated by EET Mod Runner from Forge preset (BG1:EE phase)"];
+  const eetLines = [header, "// Generated by Infinity Mod Runner from Forge preset"];
+  const bgeeLines = [header, "// Generated by Infinity Mod Runner from Forge preset (BG1:EE phase)"];
 
   for (const r of resolved) {
     if (r.isBgee) bgeeLines.push(r.line);
