@@ -46,6 +46,15 @@ src-tauri/weidu_experimental/weidu_src/**/*.cma
 src-tauri/weidu_experimental/weidu_src/**/*.o
 src-tauri/weidu_experimental/weidu_src/**/*.a
 
+# Generated source files — copied/built from platform-specific siblings by `make`.
+# The .in / .gr / arch_*.ml / case_ins_*.ml sources ARE tracked; these outputs are not.
+src-tauri/weidu_experimental/weidu_src/src/arch.ml
+src-tauri/weidu_experimental/weidu_src/src/case_ins.ml
+src-tauri/weidu_experimental/weidu_src/src/tph.ml
+src-tauri/weidu_experimental/weidu_src/src/tlexer.mll
+src-tauri/weidu_experimental/weidu_src/src/toldlexer.mll
+src-tauri/weidu_experimental/weidu_src/src/trealparserin.gr
+
 # Python bytecode (any stray __pycache__ in helper scripts)
 __pycache__/
 *.pyc
