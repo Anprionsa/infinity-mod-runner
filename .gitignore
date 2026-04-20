@@ -55,6 +55,22 @@ src-tauri/weidu_experimental/weidu_src/src/tlexer.mll
 src-tauri/weidu_experimental/weidu_src/src/toldlexer.mll
 src-tauri/weidu_experimental/weidu_src/src/trealparserin.gr
 
+# Built executables and zip artifacts at weidu_src root. `make` copies the
+# final binary to the root (`cp $(PROJECT_EXECUTABLE) .`) before the zip step,
+# and `make *_zip` writes WeiDU-<Platform>-<ver>.zip there too. None should
+# be tracked — CI produces all of these per-platform.
+src-tauri/weidu_experimental/weidu_src/weidu.exe
+src-tauri/weidu_experimental/weidu_src/weidu
+src-tauri/weidu_experimental/weidu_src/*.asm.exe
+src-tauri/weidu_experimental/weidu_src/weinstall.exe
+src-tauri/weidu_experimental/weidu_src/weinstall
+src-tauri/weidu_experimental/weidu_src/tolower.exe
+src-tauri/weidu_experimental/weidu_src/tolower
+src-tauri/weidu_experimental/weidu_src/WeiDU-*.zip
+src-tauri/weidu_experimental/weidu_src/WeiDU-Windows/
+src-tauri/weidu_experimental/weidu_src/WeiDU-Linux/
+src-tauri/weidu_experimental/weidu_src/WeiDU-Mac/
+
 # Python bytecode (any stray __pycache__ in helper scripts)
 __pycache__/
 *.pyc
